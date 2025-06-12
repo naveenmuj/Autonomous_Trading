@@ -108,16 +108,16 @@ class DataCollector:
             
     def _start_session_renewal_timer(self):
         """Start timer to renew Angel One session"""
-        def renewal_task():
-            while self.is_running:
-                time.sleep(SESSION_RENEWAL_INTERVAL)
-                if self.is_running:
-                    try:
-                        self._renew_session()
-                    except Exception as e:
-                        logger.error(f"Error in session renewal: {str(e)}")
-                        
-        self.session_timer = threading.Thread(target=renewal_task, daemon=True)
+    def renewal_task(self):
+        while self.is_running:
+            time.sleep(SESSION_RENEWAL_INTERVAL)
+            if self.is_running:
+                try:
+                    self._renew_session()
+                except Exception as e:
+                    logger.error(f"Error in session renewal: {str(e)}")
+
+        self.session_timer = threading.Thread(target=self.renewal_task, daemon=True)
         self.session_timer.start()
         logger.info("Session renewal timer started")
         
@@ -152,6 +152,7 @@ class DataCollector:
         except Exception as e:
             logger.error(f"Error renewing session: {str(e)}")
             raise
+
     def _initialize_websocket(self):
         """Initialize WebSocket connection for real-time data"""
         try:
@@ -224,21 +225,38 @@ class DataCollector:
                 except:
                     pass  # Ignore errors during cleanup
                 self.websocket = None
-            return False
-    
+            return False    
     def _on_tick_data(self, tick_data: Dict[str, Any]) -> None:
         """Handle incoming tick data"""
         try:
-            # Store tick data by token
+            # Basic validation
+            if not isinstance(tick_data, dict) or 'token' not in tick_data:
+                logger.warning(f"Invalid tick data received: {tick_data}")
+                return
+                
+            # Store tick data by token with timestamp
             token = tick_data['token']
-            self.live_data[token] = tick_data
+            tick_data['timestamp'] = datetime.now()
             
-            # Log tick data at debug level
-            logger.debug(f"Received tick: {tick_data}")
+            # Ensure numeric fields are float
+            numeric_fields = ['ltp', 'volume', 'bid_price', 'ask_price']
+            for field in numeric_fields:
+                if field in tick_data:
+                    try:
+                        tick_data[field] = float(tick_data[field])
+                    except (TypeError, ValueError):
+                        tick_data[field] = 0.0
+            
+            # Only cache data if LTP is non-zero
+            if float(tick_data.get('ltp', 0)) > 0:
+                self.live_data[token] = tick_data
+                logger.debug(f"Cached tick data for token {token}: LTP={tick_data.get('ltp')}")
             
         except Exception as e:
             logger.error(f"Error processing tick data: {str(e)}")
-    
+            logger.debug("Tick data error details:", exc_info=True)
+
+
     def _subscribe_default_symbols(self) -> None:
         """Subscribe to default symbols"""
         try:
@@ -260,36 +278,120 @@ class DataCollector:
                 logger.warning("No trading symbols configured")
                 return
 
-            logger.info(f"Subscribing to {len(symbols)} symbols...")
+            logger.info(f"Processing {len(symbols)} symbols for subscription...")
             
-            # Convert symbols to tokens and build symbol mapping
+            # Convert symbols to tokens with proper mapping
             tokens = []
+            symbol_token_map = {}  # Keep track of which token maps to which symbol
+            
             for symbol in symbols:
-                # Try both formats (with and without .NS)
-                if symbol.endswith('.NS'):
-                    base_symbol = symbol.replace('.NS', '')
-                    token = self.token_mapping.get(base_symbol)
-                else:
-                    token = self.token_mapping.get(symbol)
-                    if not token:
-                        token = self.token_mapping.get(symbol + '.NS')
-
-                if token:
-                    tokens.append(str(token))
-
-            if tokens:
-                # Subscribe to the tokens
-                self.websocket.subscribe(tokens)
+                # Try different symbol formats for robust mapping
+                base_symbol = symbol.replace('.NS', '').strip()  # Clean base symbol
+                formats_to_try = [
+                    f"{base_symbol}-EQ",  # Angel One format
+                    base_symbol,          # Base symbol
+                    f"{base_symbol}.NS"   # Yahoo Finance format
+                ]
                 
-                # Verify subscription
-                time.sleep(1)  # Give some time for subscription to process
-                active_feeds = len(self.websocket.live_feed) if self.websocket else 0
-                logger.info(f"Active market data feeds: {active_feeds}")
+                token = None
+                used_format = None
+                for fmt in formats_to_try:
+                    token = self.token_mapping.get(fmt)
+                    if token:
+                        used_format = fmt
+                        break
+                
+                if token:
+                    token_str = str(token)
+                    tokens.append(token_str)
+                    symbol_token_map[token_str] = base_symbol
+                    logger.info(f"Symbol {symbol} (as {used_format}) mapped to token {token_str}")
+                else:
+                    logger.warning(f"No token mapping found for {symbol} in any format. Symbol will be skipped.")
+
+            if not tokens:
+                logger.error("No valid tokens found for any configured symbols")
+                return
+            
+            # Subscribe to tokens in batches
+            batch_size = 5  # Smaller batch size for better reliability
+            max_retries = 3
+            retry_delay = 0.5  # seconds
+            
+            for i in range(0, len(tokens), batch_size):
+                batch = tokens[i:i + batch_size]
+                retry_count = 0
+                
+                while retry_count < max_retries:
+                    try:
+                        # Format tokens for subscription
+                        tokens_dict = {"NSE": batch}
+                        
+                        # Subscribe to batch
+                        logger.info(f"Subscribing to batch of {len(batch)} tokens...")
+                        self.websocket.subscribe(tokens_dict)
+                        
+                        # Wait for subscription to process
+                        time.sleep(0.5)
+                        
+                        # Verify subscription
+                        active_feeds = set(self.websocket.live_feed.keys())
+                        batch_success = sum(1 for t in batch if t in active_feeds)
+                        logger.info(f"Batch subscription success rate: {batch_success}/{len(batch)}")
+                        
+                        if batch_success == len(batch):
+                            break  # All tokens subscribed successfully
+                            
+                        # If partial success, retry only failed tokens
+                        if batch_success > 0:
+                            failed_tokens = [t for t in batch if t not in active_feeds]
+                            batch = failed_tokens  # Retry only failed tokens
+                            
+                        retry_count += 1
+                        if retry_count < max_retries:
+                            time.sleep(retry_delay * retry_count)  # Exponential backoff
+                            
+                    except Exception as e:
+                        logger.error(f"Error subscribing to batch: {str(e)}")
+                        retry_count += 1
+                        if retry_count < max_retries:
+                            time.sleep(retry_delay * retry_count)
+            
+            # Final verification
+            active_feeds = set(self.websocket.live_feed.keys())
+            subscribed_tokens = set(tokens)
+            successful = active_feeds.intersection(subscribed_tokens)
+            failed = subscribed_tokens - active_feeds
+            
+            logger.info(f"Subscription summary:")
+            logger.info(f"- Successfully subscribed: {len(successful)} symbols")
+            if successful:
+                logger.info(f"- Sample successful symbols: {[symbol_token_map[t] for t in list(successful)[:5]]}")
+            if failed:
+                logger.warning(f"- Failed to subscribe: {len(failed)} symbols")
+                logger.warning(f"- Failed symbols: {[symbol_token_map[t] for t in failed]}")
+
+            # Try to reconnect websocket on major failure
+            if len(successful) == 0:
+                logger.warning("No successful subscriptions, attempting to reconnect...")
+                try:
+                    self.websocket.close()
+                    time.sleep(1)
+                    self._initialize_websocket()
+                except Exception as reconnect_error:
+                    logger.error(f"Error reconnecting websocket: {str(reconnect_error)}")
 
         except Exception as e:
             logger.error(f"Error subscribing to default symbols: {str(e)}")
-            logger.debug("Subscription error details", exc_info=True)
-    
+            logger.debug("Subscription error details:", exc_info=True)
+            # Try to reconnect websocket on major failure
+            try:
+                self.websocket.close()
+                time.sleep(1)
+                self._initialize_websocket()
+            except Exception as reconnect_error:
+                logger.error(f"Error reconnecting websocket: {str(reconnect_error)}")
+
     def _initialize_angel_api(self):
         """Initialize Angel One API connection"""
         # Check if Angel One configuration exists
@@ -375,65 +477,134 @@ class DataCollector:
         """Initialize token mapping for NSE symbols"""
         try:
             logger.info("Initializing token mapping...")
-            
-            # Download instrument master file
-            response = requests.get(self.INSTRUMENT_MASTER_URL)
-            response.raise_for_status()
-            
-            instruments = response.json()
-            logger.info(f"Downloaded {len(instruments)} instruments from master file")
-            
-            # Filter and build mapping
-            self.token_mapping = {}
-            nse_symbols_found = 0
-            
+            max_retries = 3
+            retry_delay = 5
+
+            for attempt in range(max_retries):
+                try:
+                    # Download instrument master file with timeout
+                    response = requests.get(self.INSTRUMENT_MASTER_URL, timeout=10)
+                    response.raise_for_status()
+                    
+                    instruments = response.json()
+                    logger.info(f"Downloaded {len(instruments)} instruments from master file")
+                    break
+                except (requests.RequestException, json.JSONDecodeError) as e:
+                    if attempt < max_retries - 1:
+                        logger.warning(f"Attempt {attempt + 1} failed: {str(e)}. Retrying in {retry_delay} seconds...")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2
+                        continue
+                    raise
+
+            # Initialize mappings with better structure
+            self.token_mapping = {}  # Maps symbol variants to token
+            self.symbol_details = {}  # Maps token to detailed information
+            self.base_symbol_map = {}  # Maps base symbols to their variants
+            nse_instruments_count = 0
+
+            # Process all instruments
             for instrument in instruments:
                 try:
-                    exchange = instrument.get('exch_seg')
+                    # Basic validation
+                    if not all(k in instrument for k in ['exch_seg', 'token', 'symbol', 'name']):
+                        continue
+                        
+                    exchange = instrument['exch_seg']
                     if exchange != 'NSE':
                         continue
-                        
-                    token = instrument.get('token')
-                    trading_symbol = instrument.get('symbol')
-                    
-                    if not trading_symbol or not token:
-                        continue
 
-                    # Only include NSE equity symbols (ending with -EQ)
-                    if trading_symbol.endswith('-EQ'):
-                        # Store both formats of the symbol
-                        base_symbol = trading_symbol.replace('-EQ', '')
-                        yf_symbol = f"{base_symbol}.NS"  # Yahoo Finance format
-                        angel_symbol = trading_symbol    # Angel One format
+                    token = str(instrument['token'])
+                    trading_symbol = instrument['symbol'].strip()
+                    name = instrument['name'].strip()
+                    instrument_type = instrument.get('instrumenttype', '').upper()
+                    
+                    # Handle both equity and index symbols
+                    if trading_symbol.endswith('-EQ') or instrument_type == 'INDICES':
+                        # Extract base symbol without suffixes
+                        base_symbol = trading_symbol.replace('-EQ', '').strip()
                         
-                        self.token_mapping[yf_symbol] = token
-                        self.token_mapping[angel_symbol] = token
-                        nse_symbols_found += 1
+                        # Store all possible symbol variants
+                        symbol_variants = {
+                            trading_symbol,             # Original Angel One format with -EQ
+                            base_symbol,                # Clean base symbol
+                            base_symbol + '-EQ',        # Explicit Angel format
+                            base_symbol + '.NS',        # Yahoo Finance format
+                            base_symbol.replace(' ', '_'),  # Underscore format
+                            base_symbol.upper(),        # Uppercase variant
+                            name.replace(' ', '_'),     # Name-based variant
+                        }
                         
-                        logger.debug(f"Mapped symbol {base_symbol}: YF={yf_symbol}, Angel={angel_symbol}, Token={token}")
+                        # Filter out empty or invalid variants
+                        symbol_variants = {s for s in symbol_variants if s and len(s) > 1}
+                        
+                        # Map all variants to this token
+                        for variant in symbol_variants:
+                            self.token_mapping[variant] = token
+                        
+                        # Store comprehensive symbol details
+                        self.symbol_details[token] = {
+                            'token': token,
+                            'base_symbol': base_symbol,
+                            'trading_symbol': trading_symbol,
+                            'name': name,
+                            'type': instrument_type,
+                            'exchange': exchange,
+                            'variants': list(symbol_variants)
+                        }
+                        
+                        # Map base symbol to all its variants
+                        self.base_symbol_map[base_symbol] = symbol_variants
+                        
+                        nse_instruments_count += 1
                         
                 except Exception as e:
                     logger.debug(f"Error processing instrument {instrument}: {str(e)}")
                     continue
-            
+
             if not self.token_mapping:
                 raise Exception("No valid instruments found in master file")
-                
-            logger.info(f"Successfully mapped {nse_symbols_found} NSE symbols (with both formats)")
             
-            # Validate mapping for configured symbols
+            logger.info(f"Successfully processed {nse_instruments_count} NSE instruments")
+            logger.debug(f"Token mapping sample: {dict(list(self.token_mapping.items())[:3])}")
+
+            # Validate configured symbols
             symbols = self._get_trading_symbols()
-            for symbol in symbols:
-                base_symbol = symbol.replace('.NS', '')
-                angel_symbol = f"{base_symbol}-EQ"
-                if angel_symbol not in self.token_mapping and symbol not in self.token_mapping:
-                    logger.warning(f"No token mapping found for configured symbol: {symbol} (Angel format: {angel_symbol})")
+            missing_symbols = []
             
-        except requests.RequestException as e:
-            logger.error(f"Error downloading instrument master: {str(e)}")
-            raise
+            for symbol in symbols:
+                base_symbol = symbol.replace('.NS', '').replace('-EQ', '').strip()
+                
+                # Try all possible formats
+                formats_to_try = [
+                    symbol,                # Original format
+                    base_symbol,           # Base symbol
+                    f"{base_symbol}-EQ",   # Angel One format
+                    f"{base_symbol}.NS",   # Yahoo Finance format
+                    base_symbol.upper(),   # Uppercase variant
+                    base_symbol.replace(' ', '_')  # Underscore variant
+                ]
+                
+                found = False
+                for fmt in formats_to_try:
+                    if fmt in self.token_mapping:
+                        found = True
+                        token = self.token_mapping[fmt]
+                        logger.debug(f"Found mapping for {symbol} => {fmt} (token: {token})")
+                        break
+                
+                if not found:
+                    missing_symbols.append(symbol)
+                    logger.warning(f"No mapping found for {symbol} (tried formats: {formats_to_try})")
+            
+            if missing_symbols:
+                logger.warning(f"Failed to map {len(missing_symbols)} symbols: {missing_symbols}")
+            else:
+                logger.info("Successfully validated all configured symbols")
+
         except Exception as e:
-            logger.error(f"Error initializing token mapping: {str(e)}")
+            logger.error(f"Error in token mapping initialization: {str(e)}")
+            logger.debug("Full error details:", exc_info=True)
             raise
     def _discover_nse_stocks(self) -> List[str]:
         """Discover NSE stocks based on configuration criteria"""
@@ -616,93 +787,96 @@ class DataCollector:
 
             # Convert symbols to tokens and build token mapping
             tokens = []
-            token_map = {}
+            token_map = {}  # Map token to original symbol
+            failures = []
 
+            # Process symbols and map to tokens
             for symbol in symbols:
-                angel_symbol = symbol.replace('.NS', '-EQ')
+                base_symbol = symbol.replace('.NS', '')
+                angel_symbol = f"{base_symbol}-EQ"
                 token = self.token_mapping.get(angel_symbol)
+                
                 if token:
                     token_str = str(token)
                     tokens.append(token_str)
                     token_map[token_str] = symbol
                 else:
-                    logger.warning(f"Token not found for symbol {symbol}")
+                    failures.append(symbol)
+                    logger.warning(f"No token mapping found for {symbol} (Angel format: {angel_symbol})")
+
+            if failures:
+                logger.warning(f"Failed to map {len(failures)} symbols: {failures}")
 
             if not tokens:
                 logger.error("No valid tokens found for any configured symbols")
                 return pd.DataFrame()
 
-            # Initialize data structure
-            data = []
             current_time = datetime.now()
-
-            # Check if within market hours (9:15 AM to 3:30 PM IST on weekdays)
             market_open = (
                 current_time.weekday() < 5 and  # Monday to Friday
                 datetime.strptime("09:15:00", "%H:%M:%S").time() <= current_time.time() <= 
                 datetime.strptime("15:30:00", "%H:%M:%S").time()
             )
 
-            if market_open:
-                # Ensure subscription for real-time data
-                try:
-                    current_feeds = set(self.websocket.live_feed.keys() if self.websocket else set())
-                    missing_tokens = [t for t in tokens if t not in current_feeds]
-                    
-                    if missing_tokens and self.websocket and self.websocket.is_connected:
-                        logger.info(f"Subscribing to {len(missing_tokens)} missing tokens...")
-                        self.websocket.subscribe(missing_tokens)
-
-                except Exception as e:
-                    logger.error(f"Error managing WebSocket subscriptions: {str(e)}")
-
-            # Collect data
+            # Collect market data
+            data = []
+            cached_data_used = False
+            
             for token in tokens:
                 symbol = token_map[token]
-                tick_data = None
-
-                if market_open and self.websocket and token in self.websocket.live_feed:
-                    # Get real-time data if available
-                    tick_data = self.websocket.live_feed[token]
-                else:
-                    # Market is closed or no real-time data, try to get last traded price
+                market_data = {}
+                
+                # Try to get live data if market is open
+                if market_open and self.websocket and self.websocket.is_connected:
                     try:
-                        ltp_data = self.angel_api.ltpData("NSE", symbol.replace(".NS", "-EQ"), token)
-                        if ltp_data and ltp_data.get("status"):
-                            tick_data = {
-                                'token': token,
-                                'ltp': float(ltp_data['data']['ltp']),
-                                'volume': float(ltp_data['data'].get('trading_volume', 0)),
-                                'timestamp': datetime.now()
-                            }
+                        market_data = self.websocket.get_live_feed(token)
                     except Exception as e:
-                        logger.error(f"Error fetching LTP for {symbol}: {str(e)}")
-
-                if tick_data:
-                    data.append({
+                        logger.debug(f"Error getting live feed for {symbol}: {str(e)}")
+                
+                # If no live data, try to get cached data
+                if not market_data:
+                    market_data = self.live_data.get(token, {})
+                    if market_data:
+                        cached_data_used = True
+                        logger.debug(f"Using cached data for {symbol}")
+                
+                # Skip if no data available at all
+                if not market_data:
+                    logger.debug(f"No data available for {symbol}")
+                    continue
+                
+                # Create row with available data
+                try:
+                    row = {
                         'symbol': symbol,
                         'token': token,
-                        'price': tick_data.get('ltp', 0),
-                        'volume': tick_data.get('volume', 0),
-                        'bid_price': tick_data.get('bid_price', 0),
-                        'ask_price': tick_data.get('ask_price', 0),
-                        'timestamp': tick_data.get('timestamp', current_time)
-                    })
+                        'ltp': float(market_data.get('ltp', 0)),
+                        'volume': float(market_data.get('volume', 0)),
+                        'timestamp': market_data.get('timestamp', current_time),
+                        'market_status': 'OPEN' if market_open else 'CLOSED',
+                        'data_source': 'LIVE' if market_open and market_data != self.live_data.get(token, {}) else 'CACHED'
+                    }
+                    
+                    # Only add row if we have a valid LTP
+                    if row['ltp'] > 0:
+                        data.append(row)
+                except Exception as e:
+                    logger.warning(f"Error processing data for {symbol}: {str(e)}")
+                    continue
 
-            # Convert to DataFrame
-            df = pd.DataFrame(data) if data else pd.DataFrame(columns=[
-                'symbol', 'token', 'price', 'volume', 'bid_price', 'ask_price', 'timestamp'
-            ])
-
-            if df.empty:
-                logger.warning("No market data available")
+            # Create DataFrame
+            df = pd.DataFrame(data) if data else pd.DataFrame()
+            
+            if not df.empty:
+                logger.info(f"Retrieved data for {len(df)} symbols. Market {'Open' if market_open else 'Closed'}. Using {'live' if not cached_data_used else 'cached'} data.")
             else:
-                logger.debug(f"Retrieved market data for {len(df)} symbols")
-
+                logger.warning("No market data available")
+                
             return df
 
         except Exception as e:
             logger.error(f"Error getting market data: {str(e)}")
+            logger.debug("Full error details:", exc_info=True)
             return pd.DataFrame()
     @with_timeout(30)
     def get_historical_data(self, symbol: str, start_date: Optional[datetime] = None, 
