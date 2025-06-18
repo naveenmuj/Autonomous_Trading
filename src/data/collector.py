@@ -89,26 +89,36 @@ class DataCollector:
         """Initialize Angel One API connection with enhanced error handling and session management"""
         try:
             angel_config = self.config['apis']['angel_one']
-            max_retries = 5  # Increased from 3
-            retry_delay = 10  # Increased initial delay
+            max_retries = 5
+            retry_delay = 10
             retry_count = 0
+            last_error = None
             
             while retry_count < max_retries:
                 try:
-                    if not hasattr(self, 'angel_api') or self.angel_api is None:
-                        # Initialize SmartConnect with increased timeout
-                        session = requests.Session()
-                        session.timeout = 30  # Increased from default 7 seconds
-                        self.angel_api = SmartConnect(api_key=angel_config['api_key'])
-                        self.angel_api._SmartConnect__http_session = session
-                        logger.info("SmartAPI instance created with extended timeout")
+                    logger.info(f"Attempting API connection (attempt {retry_count + 1}/{max_retries})")
+                    
+                    # Initialize session with better timeout and retry settings
+                    session = requests.Session()
+                    adapter = requests.adapters.HTTPAdapter(
+                        max_retries=3,
+                        pool_connections=10,
+                        pool_maxsize=10
+                    )
+                    session.mount('https://', adapter)
+                    session.timeout = (30, 60)  # (connect timeout, read timeout)
+                    
+                    # Initialize SmartConnect
+                    self.angel_api = SmartConnect(api_key=angel_config['api_key'])
+                    self.angel_api._SmartConnect__http_session = session
+                    logger.info("SmartAPI instance created with extended timeout")
                     
                     # Generate TOTP
                     totp = pyotp.TOTP(angel_config['totp_secret'])
                     current_totp = totp.now()
-                    logger.debug(f"Generated TOTP for authentication")
+                    logger.debug("Generated TOTP successfully")
                     
-                    # Try authentication
+                    # Authenticate
                     data = self.angel_api.generateSession(
                         angel_config['client_id'],
                         angel_config['mpin'],
@@ -116,49 +126,45 @@ class DataCollector:
                     )
                     
                     if data.get('status'):
-                        # Store tokens for session management
                         self.auth_token = data['data']['jwtToken']
                         self.refresh_token = data['data']['refreshToken']
                         self.feed_token = self.angel_api.getfeedToken()
                         
-                        # Verify connection with profile fetch using refresh token
+                        # Verify connection
                         profile = self.angel_api.getProfile(self.refresh_token)
                         if profile.get('status'):
-                            logger.info(f"Successfully authenticated as {profile['data'].get('name', 'Unknown')}")
-                            
-                            # Set up session auto-renewal
-                            self._start_session_renewal_timer()
-                            return  # Success, exit the retry loop
-                        else:
-                            error_msg = profile.get('message', 'Unknown error')
-                            logger.error(f"Failed to get user profile: {error_msg}")
-                            
-                    else:
-                        error_msg = data.get('message', 'Unknown error')
-                        logger.error(f"Failed to authenticate with Angel One API: {error_msg}")
-                        if 'rate' in str(error_msg).lower():
-                            # Handle rate limiting with exponential backoff
-                            retry_count += 1
-                            if retry_count < max_retries:
-                                retry_delay *= 2  # Exponential backoff
-                                logger.warning(f"Rate limited, retrying in {retry_delay}s ({retry_count}/{max_retries})")
-                                time.sleep(retry_delay)
-                                continue
-                        raise Exception(f"Authentication failed: {error_msg}")
-                        
+                            logger.info(f"Successfully authenticated with Angel One API")
+                            logger.info(f"Successfully retrieved user profile for {profile['data'].get('name', 'Unknown')}")
+                            return
+                    
+                    retry_count += 1
+                    if retry_count < max_retries:
+                        wait_time = retry_delay * (2 ** (retry_count - 1))  # Exponential backoff
+                        logger.warning(f"Authentication failed, retrying in {wait_time} seconds...")
+                        time.sleep(wait_time)
+                    
+                except requests.exceptions.Timeout as e:
+                    last_error = e
+                    retry_count += 1
+                    if retry_count < max_retries:
+                        wait_time = retry_delay * (2 ** (retry_count - 1))
+                        logger.warning(f"Connection timeout, retrying in {wait_time} seconds...")
+                        time.sleep(wait_time)
+                    
                 except Exception as e:
-                    error_msg = str(e)
-                    logger.error(f"Error connecting to Angel One API: {error_msg}")
-                    if 'rate' in error_msg.lower():
-                        retry_count += 1
-                        if retry_count < max_retries:
-                            retry_delay *= 2  # Exponential backoff
-                            logger.warning(f"Rate limited, retrying in {retry_delay}s ({retry_count}/{max_retries})")
-                            time.sleep(retry_delay)
-                            continue
-                    raise  # Re-raise if not rate limited or out of retries
+                    last_error = e
+                    retry_count += 1
+                    if retry_count < max_retries:
+                        wait_time = retry_delay * (2 ** (retry_count - 1))
+                        logger.warning(f"Error during authentication: {str(e)}, retrying in {wait_time} seconds...")
+                        time.sleep(wait_time)
             
-            raise Exception("Maximum retry attempts reached")
+            # If we get here, all retries failed
+            error_msg = f"Failed to initialize Angel One API after {max_retries} attempts"
+            if last_error:
+                error_msg += f": {str(last_error)}"
+            logger.error(error_msg)
+            raise Exception(error_msg)
             
         except Exception as e:
             logger.error(f"Error initializing Angel One API: {str(e)}")
@@ -221,87 +227,75 @@ class DataCollector:
         """Initialize token mapping for configured symbols"""
         try:
             logger.info("Initializing token mapping...")
+              # Define symbol mappings for standardization
+            self.symbol_mappings = {
+                'HDFC.NS': 'HDFCBANK.NS',
+                'ICICI.NS': 'ICICIBANK.NS'
+            }
+            
+            # Get configured symbols based on mode
+            mapped_symbols = self.get_symbols_from_config()
+            
+            # Apply symbol mappings
+            mapped_symbols = [self.symbol_mappings.get(s, s) for s in mapped_symbols]
+            # Remove duplicates while preserving order
+            mapped_symbols = list(dict.fromkeys(mapped_symbols))
+                    
+            # Download instrument file with retry logic
             instrument_url = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
             
-            # Retry logic for rate limit with timeout
             for attempt in range(3):
                 try:
                     logger.info(f"Downloading instrument file (attempt {attempt + 1}/3)...")
-                    response = requests.get(instrument_url, timeout=30)  # 30 seconds timeout
+                    response = requests.get(instrument_url, timeout=30)
                     if response.status_code == 200:
                         data = response.json()
                         logger.info("Successfully downloaded instrument file")
                         break
-                    else:
-                        logger.error(f"Failed to download instrument file: HTTP {response.status_code}")
-                        time.sleep(2 ** attempt)
-                except requests.Timeout:
-                    logger.error(f"Timeout downloading instrument file (attempt {attempt + 1}/3)")
-                    time.sleep(2 ** attempt)
                 except Exception as e:
-                    logger.error(f"Error downloading instrument file: {str(e)} (attempt {attempt + 1}/3)")
-                    time.sleep(2 ** attempt)
+                    logger.error(f"Error downloading instrument file: {str(e)}")
+                    if attempt < 2:  # Don't sleep on last attempt
+                        time.sleep(2 ** attempt)
             else:
-                logger.error("Failed to download instrument file after all retries")
-                raise ConnectionError("Could not download instrument file")
-
-            # Get trading symbols from config
-            trading_cfg = self.config.get('trading', {})
-            data_cfg = trading_cfg.get('data', {})
+                raise Exception("Failed to download instrument file after 3 attempts")
             
-            symbols = []
-            if data_cfg.get('mode') == 'manual':
-                symbols = data_cfg.get('manual_symbols', [])
-            elif data_cfg.get('mode') == 'auto':
-                symbols = data_cfg.get('manual_list', [])
-
-            if not symbols:
-                logger.warning("No trading symbols configured")
-                return
-
             # Map symbols to tokens
+            self.symbol_token_map = {}
             mapped_count = 0
             unmapped_symbols = []
             
-            for symbol in symbols:
-                if not isinstance(symbol, str):
-                    logger.warning(f"Skipping invalid symbol: {symbol} (not a string)")
-                    continue
-                    
-                # Convert NSE symbol format to Angel One format
-                if '-EQ' in symbol:
-                    angel_symbol = symbol
-                elif '.NS' in symbol:
-                    angel_symbol = symbol.replace('.NS', '-EQ')
-                else:
-                    angel_symbol = f"{symbol}-EQ"
-                    
-                found = False
+            for symbol in mapped_symbols:
+                base_symbol = symbol.replace('.NS', '')
+                token = None
                 
+                # Search for token
                 for instrument in data:
-                    if (instrument['symbol'] == angel_symbol and 
-                        instrument['exch_seg'] == 'NSE'):
-                        self.symbol_token_map[symbol] = instrument['token']
-                        self.token_symbol_map[instrument['token']] = symbol
+                    if (instrument['symbol'] == base_symbol or 
+                        instrument['symbol'] == f"{base_symbol}-EQ"):
+                        token = instrument['token']
+                        self.symbol_token_map[symbol] = token
                         mapped_count += 1
-                        found = True
-                        logger.debug(f"Mapped {symbol} to token {instrument['token']}")
+                        logger.debug(f"Mapped {symbol} to token {token}")
                         break
-                
-                if not found:
+                        
+                if not token:
                     unmapped_symbols.append(symbol)
-                    logger.warning(f"Could not find token for symbol: {symbol}")
             
             if mapped_count == 0:
                 raise ValueError("No symbols could be mapped to tokens")
             
-            logger.info(f"Successfully mapped {mapped_count}/{len(symbols)} symbols to tokens")
+            logger.info(f"Successfully mapped {mapped_count}/{len(mapped_symbols)} symbols to tokens")
             if unmapped_symbols:
                 logger.warning(f"Unmapped symbols: {', '.join(unmapped_symbols)}")
-                
+            
+            # Update config with mapped symbols
+            trading_config = self.config.get('trading', {})
+            trading_config['symbols'] = mapped_symbols
+            self.config['trading'] = trading_config
+            
         except Exception as e:
             logger.error(f"Error initializing token mapping: {str(e)}")
-            raise  # Re-raise to prevent continuing with incomplete mapping
+            raise
             
     def _initialize_websocket(self):
         """Initialize WebSocket connection for live market data"""
@@ -395,197 +389,141 @@ class DataCollector:
             # Store data for further processing if needed
             # You can add more processing logic here
             
-        except Exception as e:
-            logger.error(f"Error processing market data: {str(e)}")
+        except Exception as e:            logger.error(f"Error processing market data: {str(e)}")
 
     def cleanup(self):
         """Cleanup resources"""
         try:
-            if self.websocket:
+            if hasattr(self, 'websocket') and self.websocket:
                 self.websocket.close()
                 logger.info("WebSocket connection closed")
         except Exception as e:
-            logger.error(f"Error during cleanup: {str(e)}")    
-    @with_rate_limit(max_retries=5, initial_delay=2.0)
-    def get_historical_data(self, symbol: str, days: int = 10, interval: str = 'ONE_DAY') -> pd.DataFrame:
-        """Get historical data with enhanced error handling and market hours consideration"""
+            logger.error(f"Error during cleanup: {str(e)}")
+
+    def get_historical_data(self, symbol: str, interval: str = 'ONE_DAY', days: int = 10) -> pd.DataFrame:
+        """Get historical data for a symbol with robust error handling
+        
+        Args:
+            symbol: Trading symbol (e.g., 'RELIANCE.NS')
+            interval: Time interval ('1m', '5m', '15m', '30m', '1h', '1d')
+            days: Number of days of historical data
+            
+        Returns:
+            pd.DataFrame: Historical data with columns timestamp, open, high, low, close, volume
+            Returns empty DataFrame on error
+        """
+        empty_df = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        
         try:
+            # Get token for symbol
             token = self.symbol_token_map.get(symbol)
             if not token:
-                raise ValueError(f"No token found for symbol {symbol}")
-                
-            # Enhanced rate limiting with token-specific backoff
-            retry_attempt = 0
-            max_local_retries = 5  # Increased retries for rate limit recovery
-            initial_delay = 2.0
+                logger.error(f"No token found for symbol {symbol}")
+                return empty_df
             
-            # Initialize token-specific backoff dict
-            token_backoff = getattr(self, '_token_backoff', {})
-            if not hasattr(self, '_token_backoff'):
-                self._token_backoff = token_backoff
-                
-            if token not in token_backoff:
-                token_backoff[token] = {
-                    'error_count': 0,
-                    'last_error': None,
-                    'backoff_multiplier': 1.0,
-                    'cooldown_until': 0
-                }
+            # Map interval to Angel One format
+            interval_map = {
+                '1m': 'ONE_MINUTE',
+                '5m': 'FIVE_MINUTE',
+                '15m': 'FIFTEEN_MINUTE',
+                '30m': 'THIRTY_MINUTE',
+                '1h': 'ONE_HOUR',
+                '1d': 'ONE_DAY'
+            }
+            angel_interval = interval_map.get(interval, interval)
             
-            while retry_attempt < max_local_retries:
-                now = time.time()
-                
-                # Check cooldown period
-                if token_backoff[token]['cooldown_until'] > now:
-                    wait_time = token_backoff[token]['cooldown_until'] - now
-                    logger.info(f"Token {token} ({symbol}) in cooldown, waiting {wait_time:.2f}s")
-                    time.sleep(wait_time)
-                
-                # Apply rate limiting with token awareness
-                backoff_mul = token_backoff[token]['backoff_multiplier']
-                wait_time = self._rate_limiter.acquire() * backoff_mul
-                if wait_time > 0:
-                    logger.info(f"Rate limited for {symbol} (token {token}), waiting {wait_time:.2f}s (backoff: {backoff_mul:.1f}x)")
-                    time.sleep(wait_time)
-                
-                # Check market status before proceeding
-                market_status = self.get_market_status()
-                if not market_status.get('NSE', False):
-                    logger.warning("Market is closed, historical data may be delayed")
-                    time.sleep(random.uniform(1.0, 3.0))
-                
-                # Calculate date range with market hours consideration
-                to_date = datetime.now()
-                if to_date.hour < 9 or (to_date.hour == 9 and to_date.minute < 15):
-                    to_date = to_date.replace(hour=15, minute=30, second=0, microsecond=0) - timedelta(days=1)
-                elif to_date.hour > 15 or (to_date.hour == 15 and to_date.minute > 30):
-                    to_date = to_date.replace(hour=15, minute=30, second=0, microsecond=0)
-                
-                from_date = to_date - timedelta(days=days)
-                
-                params = {
-                    "exchange": "NSE",
-                    "symboltoken": token,
-                    "interval": interval,
-                    "fromdate": from_date.strftime("%Y-%m-%d %H:%M"),
-                    "todate": to_date.strftime("%Y-%m-%d %H:%M")
-                }
-                
+            # Calculate date range
+            end_date = datetime.now().replace(hour=15, minute=30, second=0, microsecond=0)
+            if end_date.hour < 9 or (end_date.hour == 9 and end_date.minute < 15):
+                end_date = end_date - timedelta(days=1)
+            start_date = end_date - timedelta(days=days)
+            
+            # Prepare request parameters
+            params = {
+                "exchange": "NSE",
+                "symboltoken": str(token),
+                "interval": angel_interval,
+                "fromdate": start_date.strftime("%Y-%m-%d 09:15"),
+                "todate": end_date.strftime("%Y-%m-%d 15:30")
+            }
+            
+            # Try to get data with retries
+            for attempt in range(3):
                 try:
                     response = self.angel_api.getCandleData(params)
                     
-                    if response and response.get('data'):
-                        data = response['data']
-                        df = pd.DataFrame(
-                            data,
-                            columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
-                        )
-                        df['timestamp'] = pd.to_datetime(df['timestamp'])
-                        
-                        # Reset error count on success
-                        token_backoff[token]['error_count'] = max(0, token_backoff[token]['error_count'] - 1)
-                        token_backoff[token]['backoff_multiplier'] = max(1.0, token_backoff[token]['backoff_multiplier'] * 0.5)
-                        
-                        return df
-                    else:
-                        error_msg = response.get('message', 'Unknown error')
-                        error_code = response.get('errorcode', '')
-                        
-                        # Check for various error conditions
-                        is_rate_limit = any(x in str(error_msg).lower() for x in ['rate', 'limit', 'access denied', 'ab1004'])
-                        is_auth_error = 'authentication' in str(error_msg).lower() or error_code == 'AG8001'
-                        
-                        if is_rate_limit or error_code == 'AB1004':
-                            # Update token-specific backoff
-                            token_backoff[token]['error_count'] += 1
-                            token_backoff[token]['last_error'] = now
-                            
-                            # Exponential backoff with token-specific multiplier
-                            token_backoff[token]['backoff_multiplier'] = min(
-                                8.0,  # Cap multiplier
-                                1.0 + (token_backoff[token]['error_count'] * 0.5)
-                            )
-                            
-                            # Set cooldown period for severe rate limiting
-                            if token_backoff[token]['error_count'] >= 3:
-                                cooldown = 60.0 * (2 ** min(token_backoff[token]['error_count'] - 3, 3))
-                                token_backoff[token]['cooldown_until'] = now + cooldown
-                                logger.warning(f"Token {token} ({symbol}) in cooldown for {cooldown:.1f}s due to repeated rate limits")
-                            
-                            retry_attempt += 1
-                            if retry_attempt < max_local_retries:
-                                # Calculate backoff with jitter
-                                base_wait = initial_delay * (2 ** retry_attempt) * token_backoff[token]['backoff_multiplier']
-                                jitter = random.uniform(0.8, 1.2)  # ±20% jitter
-                                wait = base_wait * jitter
-                                
-                                logger.warning(
-                                    f"Rate limit/AB1004 for {symbol} (token {token}): {error_msg}, "
-                                    f"retry {retry_attempt}/{max_local_retries} in {wait:.1f}s "
-                                    f"(backoff: {token_backoff[token]['backoff_multiplier']:.1f}x)"
-                                )
-                                time.sleep(wait)
-                                continue
-                        elif is_auth_error:
-                            logger.error(f"Authentication error for {symbol}: {error_msg}")
-                            break
-                        else:
-                            logger.warning(f"Invalid response format: {response}")
-                            retry_attempt += 1
-                            if retry_attempt < max_local_retries:
-                                wait = initial_delay * (2 ** retry_attempt)
-                                time.sleep(wait)
-                                continue
-                
-                except Exception as e:
-                    error_msg = str(e)
-                    retry_attempt += 1
-                    
-                    # Check if exception indicates rate limiting
-                    if any(x in error_msg.lower() for x in ['rate', 'limit', 'access denied', 'ab1004']):
-                        # Update token-specific backoff
-                        token_backoff[token]['error_count'] += 1
-                        token_backoff[token]['last_error'] = now
-                        if retry_attempt < max_local_retries:
-                            wait = initial_delay * (2 ** retry_attempt) * token_backoff[token]['backoff_multiplier']
-                            logger.warning(f"Rate limit error for {symbol}: {error_msg}, retry {retry_attempt}/{max_local_retries} in {wait:.1f}s")
-                            time.sleep(wait)
-                            continue
-                    elif retry_attempt < max_local_retries:
-                        wait = initial_delay * (2 ** retry_attempt)
-                        logger.warning(f"Error for {symbol}: {error_msg}, retry {retry_attempt}/{max_local_retries} in {wait:.1f}s")
-                        time.sleep(wait)
+                    if not response:
+                        logger.warning(f"Empty response for {symbol} on attempt {attempt + 1}")
+                        if attempt < 2:
+                            time.sleep(2 ** attempt)
                         continue
                     
-                    logger.error(f"Error fetching data for {symbol}: {e}")
-                    break
+                    if isinstance(response, str):
+                        response = json.loads(response)
+                    
+                    data = response.get('data', [])
+                    if not data:
+                        logger.warning(f"No data for {symbol} on attempt {attempt + 1}")
+                        if attempt < 2:
+                            time.sleep(2 ** attempt)
+                        continue
+                    
+                    # Create DataFrame with proper types
+                    df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    df['timestamp'] = pd.to_datetime(df['timestamp'])
+                    for col in ['open', 'high', 'low', 'close']:
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
+                    df['volume'] = pd.to_numeric(df['volume'], errors='coerce').fillna(0).astype(int)
+                    
+                    # Clean up the data
+                    df = df.sort_values('timestamp')
+                    df = df.drop_duplicates(subset=['timestamp'], keep='last')
+                    df = df.reset_index(drop=True)
+                    
+                    logger.info(f"Successfully fetched {len(df)} records for {symbol}")
+                    return df
+                    
+                except Exception as e:
+                    logger.error(f"Error on attempt {attempt + 1} for {symbol}: {str(e)}")
+                    if attempt < 2:
+                        time.sleep(2 ** attempt)
             
-            logger.warning(f"No data available for {symbol} after {retry_attempt} attempts")
-            return pd.DataFrame()
+            logger.error(f"Failed to fetch data for {symbol} after 3 attempts")
+            return empty_df
             
         except Exception as e:
-            logger.error(f"Error fetching historical data for {symbol}: {e}")
-            return pd.DataFrame()
+            logger.error(f"Unexpected error for {symbol}: {str(e)}")
+            return empty_df
 
     @with_rate_limit(max_retries=3, initial_delay=1.0)
-    def get_ltp(self, symbol: str) -> float:
-        """Get last traded price for a symbol"""
+    def get_ltp(self, symbol: str) -> Optional[dict]:
+        """Get Last Traded Price for a symbol with enhanced error handling"""
         try:
-            token = self.symbol_token_map.get(symbol)
-            if not token:
-                raise ValueError(f"No token found for symbol {symbol}")
-                
-            ltp_data = self.angel_api.ltpData("NSE", symbol.replace('.NS', '-EQ'), token)
+            # Handle .NS extension and get token
+            base_symbol = symbol.replace('.NS', '')
+            token = self.symbol_token_map.get(symbol) or self.symbol_token_map.get(base_symbol)
             
-            if ltp_data and ltp_data.get('data', {}).get('ltp'):
-                return float(ltp_data['data']['ltp'])
+            if not token:
+                logger.error(f"No token found for symbol {symbol}")
+                return None
+            
+            # Try to get quote data
+            quote_data = self.angel_api.ltpData("NSE", base_symbol + "-EQ", str(token))
+            
+            if quote_data and quote_data.get('data'):
+                data = quote_data['data']
+                return {
+                    'ltp': float(data.get('ltp', 0)),
+                    'volume': int(data.get('volume', 0)) if 'volume' in data else 0,
+                    'change': float(data.get('netPrice', 0)) if 'netPrice' in data else 0,
+                }
             else:
                 logger.warning(f"No LTP data available for {symbol}")
-                return 0.0
+                return None
                 
         except Exception as e:
             logger.error(f"Error fetching LTP data for {symbol}: {str(e)}")
-            raise
+            return None
             
     @with_rate_limit(max_retries=3, initial_delay=1.0)
     def get_quote(self, symbol: str) -> Optional[Dict[str, Any]]:
@@ -861,3 +799,99 @@ class DataCollector:
         except Exception as e:
             logger.error(f"Error getting live quote for {symbol}: {e}")
             return None
+        
+    def _convert_ltp_data(self, data: Any) -> Optional[dict]:
+        """Safely convert LTP data to required format"""
+        try:
+            if isinstance(data, (int, float)):
+                return {'ltp': float(data), 'change': 0.0, 'volume': 0}
+            elif isinstance(data, dict):
+                return {
+                    'ltp': float(data.get('ltp', 0)),
+                    'change': float(data.get('change', 0)),
+                    'volume': int(data.get('volume', 0))
+                }
+            return None
+        except (TypeError, ValueError) as e:
+            logger.error(f"Error converting LTP data: {e}")
+            return None
+        
+    def _validate_token_mapping(self, symbol: str) -> Optional[str]:
+        """Validate and get token for symbol with better error handling"""
+        try:
+            if not symbol:
+                logger.error("Empty symbol provided")
+                return None
+                
+            token = self.symbol_token_map.get(symbol)
+            if not token:
+                # Try alternative symbol formats
+                alt_symbol = symbol.replace('.NS', '') if '.NS' in symbol else f"{symbol}.NS"
+                token = self.symbol_token_map.get(alt_symbol)
+                
+            if not token:
+                logger.error(f"No token found for symbol {symbol}")
+                return None
+                
+            return str(token)
+            
+        except Exception as e:
+            logger.error(f"Error validating token for {symbol}: {e}")
+            return None
+        
+    def get_symbols_from_config(self) -> List[str]:
+        """Get list of symbols based on trading mode from config"""
+        trading_config = self.config.get('trading', {})
+        data_config = trading_config.get('data', {})
+        mode = data_config.get('mode', 'manual')
+        
+        symbols = []
+        
+        if mode == 'manual':
+            # Get manually configured symbols
+            symbols = data_config.get('manual_symbols', [])
+        elif mode == 'auto':
+            # Get auto-configured symbols based on criteria
+            auto_config = data_config.get('auto', {})
+            # In real implementation, you would fetch symbols based on:
+            # - market_caps
+            # - min_volume
+            # - sectors
+            # For now, use a default list
+            symbols = self._get_default_symbols()
+        
+        # Always add configured indices
+        indices = data_config.get('indices', [])
+        symbols.extend(indices)
+        
+        # Remove any excluded symbols
+        excluded = data_config.get('exclude_symbols', [])
+        symbols = [s for s in symbols if s not in excluded]
+        
+        # Remove duplicates while preserving order
+        return list(dict.fromkeys(symbols))
+        
+    def _get_default_symbols(self) -> List[str]:
+        """Get default symbols list when no specific symbols are configured"""
+        return [
+            'RELIANCE.NS',
+            'TCS.NS',
+            'HDFCBANK.NS',
+            'INFY.NS',
+            'ICICIBANK.NS'
+        ]
+    
+    def get_last_known_ltp(self, symbol: str) -> Optional[dict]:
+        """Get last known LTP for a symbol from historical data as fallback"""
+        try:
+            # Try to get the most recent close price from historical data
+            df = self.get_historical_data(symbol, interval='1d', days=1)
+            if df is not None and not df.empty:
+                last_row = df.iloc[-1]
+                return {
+                    'ltp': last_row['close'],
+                    'timestamp': last_row['timestamp']
+                }
+        except Exception as e:
+            logger.error(f"Error fetching last known LTP for {symbol}: {str(e)}")
+        return None

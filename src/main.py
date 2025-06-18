@@ -1,7 +1,7 @@
 import streamlit as st
 # Must set page config as the first Streamlit command
 st.set_page_config(
-    page_title="AI Trading Dashboard",
+    page_title="Dashboard",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -178,52 +178,64 @@ def load_config():
 
 @st.cache_resource
 def initialize_components(config):
-    """Initialize all system components with progress tracking"""
+    """Initialize all system components"""
     logger.info("Initializing system components...")
     
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
     try:
-        # Initialize DataCollector (25%)
-        status_text.text("Initializing Data Collector...")
+        # Initialize DataCollector
         collector = DataCollector(config)
-        progress_bar.progress(25)
         
-        # Initialize TradeManager (50%)
-        status_text.text("Initializing Trade Manager...")
+        # Initialize Trade Manager
         trade_manager = TradeManager(config, collector)
-        progress_bar.progress(50)
         
-        # Initialize AI components (75%)
-        status_text.text("Initializing AI Models...")
-        ai_trader = AITrader(config)
+        # Initialize Models
         technical_analyzer = TechnicalAnalysisModel(config)
-        sentiment_analyzer = SentimentAnalyzer(config)
-        progress_bar.progress(75)
+        ai_model = AITrader(config)
         
-        # Initialize Dashboard (100%)
-        status_text.text("Initializing Dashboard...")
+        # Initialize Dashboard
         dashboard = DashboardUI(
             config=config,
             data_collector=collector,
             trade_manager=trade_manager,
-            ai_trader=ai_trader,
             technical_analyzer=technical_analyzer,
-            sentiment_analyzer=sentiment_analyzer
+            ai_model=ai_model
         )
-        progress_bar.progress(100)
         
-        # Clear temporary UI elements
-        status_text.empty()
-        progress_bar.empty()
-        
+        logger.info("All components initialized successfully")
         return dashboard
         
     except Exception as e:
-        if 'progress_bar' in locals(): progress_bar.empty()
-        if 'status_text' in locals(): status_text.empty()
-        logger.error(f"Error initializing components: {e}")
+        logger.error(f"Error initializing components: {str(e)}")
+        raise
+
+def initialize_system():
+    """Initialize system components with proper configuration"""
+    try:
+        # Load config
+        config_path = os.path.join(project_root, 'config.yaml')
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+        
+        # Update symbol names to match Angel One format
+        trading_config = config.get('trading', {})
+        symbol_mapping = {
+            'HDFC.NS': 'HDFCBANK.NS',  # Correct HDFC to HDFCBANK
+            'ICICI.NS': 'ICICIBANK.NS',  # Correct ICICI to ICICIBANK
+        }
+        
+        symbols = trading_config.get('symbols', [])
+        corrected_symbols = [symbol_mapping.get(s, s) for s in symbols]
+        trading_config['symbols'] = corrected_symbols
+        config['trading'] = trading_config
+        
+        # Save corrected config
+        with open(config_path, 'w') as f:
+            yaml.dump(config, f, default_flow_style=False)
+            
+        return config
+        
+    except Exception as e:
+        logger.error(f"Error initializing system: {e}")
         raise
 
 def main():
@@ -231,7 +243,7 @@ def main():
     
     try:
         # Create title and initialization message
-        st.title("AI Trading Dashboard")
+        st.title("")
         init_message = st.empty()
         init_message.info("Initializing trading system... This may take a few moments.")
         

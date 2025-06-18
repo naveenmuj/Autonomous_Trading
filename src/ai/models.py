@@ -412,6 +412,152 @@ class TechnicalAnalysisModel:
             'f1': f1_score(y, y_pred)
         }
 
+    def analyze(self, data: pd.DataFrame, indicators: List[str]) -> Dict[str, Any]:
+        """Analyze data with selected technical indicators"""
+        try:
+            logger.info(f"Analyzing data with indicators: {indicators}")
+            results = {}
+            
+            # Calculate requested indicators
+            if "RSI" in indicators:
+                rsi = talib.RSI(data['close'].values, timeperiod=self.rsi_period)
+                results['RSI'] = {
+                    'value': rsi[-1] if not np.isnan(rsi[-1]) else 50,
+                    'signal': 'Oversold' if rsi[-1] < 30 else 'Overbought' if rsi[-1] > 70 else 'Neutral'
+                }
+            
+            if "MACD" in indicators:
+                macd, signal, hist = talib.MACD(
+                    data['close'].values,
+                    fastperiod=self.macd_fast,
+                    slowperiod=self.macd_slow,
+                    signalperiod=self.macd_signal
+                )
+                results['MACD'] = {
+                    'value': macd[-1] if not np.isnan(macd[-1]) else 0,
+                    'signal': signal[-1] if not np.isnan(signal[-1]) else 0,
+                    'histogram': hist[-1] if not np.isnan(hist[-1]) else 0
+                }
+            
+            if "SMA" in indicators:
+                for period in [20, 50, 200]:
+                    sma = talib.SMA(data['close'].values, timeperiod=period)
+                    results[f'SMA_{period}'] = {
+                        'value': sma[-1] if not np.isnan(sma[-1]) else data['close'].iloc[-1],
+                        'signal': 'Above' if data['close'].iloc[-1] > sma[-1] else 'Below'
+                    }
+            
+            if "Bollinger Bands" in indicators:
+                upper, middle, lower = talib.BBANDS(
+                    data['close'].values,
+                    timeperiod=self.bb_period,
+                    nbdevup=self.bb_std,
+                    nbdevdn=self.bb_std
+                )
+                results['BB'] = {
+                    'upper': upper[-1] if not np.isnan(upper[-1]) else data['close'].iloc[-1],
+                    'middle': middle[-1] if not np.isnan(middle[-1]) else data['close'].iloc[-1],
+                    'lower': lower[-1] if not np.isnan(lower[-1]) else data['close'].iloc[-1]
+                }
+            
+            logger.info("Technical analysis completed successfully")
+            return results
+            
+        except Exception as e:
+            logger.error(f"Error in technical analysis: {e}")
+            return {}
+
+    def analyze(self, data: pd.DataFrame, indicator_config: Dict = None) -> Dict[str, Any]:
+        """Analyze price data with specified indicators
+        
+        Args:
+            data: DataFrame with OHLCV data
+            indicator_config: Dictionary specifying which indicators to calculate
+            
+        Returns:
+            Dictionary containing calculated indicators and analysis results
+        """
+        try:
+            if data is None or len(data) == 0:
+                logger.warning("No data provided for analysis")
+                return {}
+                
+            df = data.copy()
+            results = {}
+            
+            # Calculate requested indicators
+            for category, indicators in indicator_config.items():
+                results[category] = {}
+                
+                if category == 'trend_indicators':
+                    if indicators.get('sma'):
+                        for period in indicators['sma']:
+                            df[f'sma_{period}'] = talib.SMA(df['close'], timeperiod=period)
+                            results[category][f'sma_{period}'] = df[f'sma_{period}'].values
+                            
+                    if indicators.get('ema'):
+                        for period in indicators['ema']:
+                            df[f'ema_{period}'] = talib.EMA(df['close'], timeperiod=period)
+                            results[category][f'ema_{period}'] = df[f'ema_{period}'].values
+                            
+                    if indicators.get('macd'):
+                        macd_config = indicators['macd']
+                        macd, signal, hist = talib.MACD(
+                            df['close'],
+                            fastperiod=macd_config['fast'],
+                            slowperiod=macd_config['slow'],
+                            signalperiod=macd_config['signal']
+                        )
+                        results[category]['macd'] = {
+                            'macd': macd,
+                            'signal': signal,
+                            'histogram': hist
+                        }
+                        
+                elif category == 'momentum_indicators':
+                    if indicators.get('rsi'):
+                        period = indicators['rsi']['period']
+                        df['rsi'] = talib.RSI(df['close'], timeperiod=period)
+                        results[category]['rsi'] = df['rsi'].values
+                        
+                elif category == 'volatility_indicators':
+                    if indicators.get('bollinger_bands'):
+                        bb_config = indicators['bollinger_bands']
+                        upper, middle, lower = talib.BBANDS(
+                            df['close'],
+                            timeperiod=bb_config['period'],
+                            nbdevup=bb_config['std_dev'],
+                            nbdevdn=bb_config['std_dev']
+                        )
+                        results[category]['bollinger_bands'] = {
+                            'upper': upper,
+                            'middle': middle,
+                            'lower': lower
+                        }
+                        
+                elif category == 'volume_indicators':
+                    if indicators.get('volume_sma'):
+                        period = indicators['volume_sma']
+                        df['volume_sma'] = talib.SMA(df['volume'], timeperiod=period)
+                        results[category]['volume_sma'] = df['volume_sma'].values
+            
+            # Add basic price data
+            results['price_data'] = {
+                'open': df['open'].values,
+                'high': df['high'].values,
+                'low': df['low'].values,
+                'close': df['close'].values,
+                'volume': df['volume'].values,
+                'timestamp': df['timestamp'].values
+            }
+            
+            logger.info(f"Analysis complete with {len(results)} indicator categories")
+            return results
+            
+        except Exception as e:
+            logger.error(f"Error in technical analysis: {str(e)}")
+            return {}
+
 class SentimentAnalyzer:
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.config = config or {}

@@ -480,3 +480,23 @@ class TradeManager:
         except Exception as e:
             logger.error(f"Error initializing account value: {str(e)}")
             self.account_value = self.config.get('initial_account_value', 100000)
+
+    def get_positions(self) -> List[Dict]:
+        """Get current positions with enhanced error handling"""
+        try:
+            if hasattr(self, '_positions'):
+                return [
+                    {
+                        'symbol': pos['symbol'],
+                        'quantity': pos['quantity'],
+                        'entry_price': pos['entry_price'],
+                        'current_price': pos['current_price'],
+                        'pnl': pos['pnl'],
+                        'status': pos['status']
+                    }
+                    for pos in self._positions.values()
+                ]
+            return []
+        except Exception as e:
+            logger.error(f"Error getting positions: {e}")
+            return []
