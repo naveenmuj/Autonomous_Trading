@@ -33,50 +33,139 @@ class TechnicalAnalysisModel:
         self.macd_signal = tech_params.get('macd_signal', 9)
         self.bb_period = tech_params.get('bb_period', 20)
         self.bb_std = tech_params.get('bb_std', 2)
+        self.support_resistance_periods = [20, 50, 200]  # Periods for SR levels
+        self.trend_detection_periods = [10, 20, 50]  # Periods for trend detection
+        
+        # Initialize storage for support/resistance levels
+        self.support_levels = {}
+        self.resistance_levels = {}
+        self.trends = {}
+        
+        logger.debug("TechnicalAnalysisModel initialized with config: %s", tech_params)
+
+    def calculate_support_resistance(self, data: pd.DataFrame) -> Tuple[Dict[str, float], Dict[str, float]]:
+        """Calculate support and resistance levels using multiple methods"""
+        try:
+            df = data.copy()
+            supports = {}
+            resistances = {}
+            
+            # Method 1: Moving Average based SR levels
+            for period in self.support_resistance_periods:
+                ma = talib.SMA(df['close'].values, timeperiod=period)
+                supports[f'ma_{period}'] = ma[-1] * 0.98  # 2% below MA
+                resistances[f'ma_{period}'] = ma[-1] * 1.02  # 2% above MA
+            
+            # Method 2: Pivot Points
+            high, low, close = df['high'].iloc[-1], df['low'].iloc[-1], df['close'].iloc[-1]
+            pivot = (high + low + close) / 3
+            supports['pivot_s1'] = (2 * pivot) - high
+            supports['pivot_s2'] = pivot - (high - low)
+            resistances['pivot_r1'] = (2 * pivot) - low
+            resistances['pivot_r2'] = pivot + (high - low)
+            
+            # Method 3: Recent swing highs/lows
+            window = 20
+            df['swing_high'] = df['high'].rolling(window=window, center=True).max()
+            df['swing_low'] = df['low'].rolling(window=window, center=True).min()
+            
+            supports['swing'] = df['swing_low'].iloc[-1]
+            resistances['swing'] = df['swing_high'].iloc[-1]
+            
+            logger.debug("Calculated support levels: %s", supports)
+            logger.debug("Calculated resistance levels: %s", resistances)
+            
+            return supports, resistances
+            
+        except Exception as e:
+            logger.error("Error calculating support/resistance: %s", str(e))
+            return {}, {}
+
+    def detect_trends(self, data: pd.DataFrame) -> Dict[str, str]:
+        """Detect market trends using multiple timeframes"""
+        try:
+            df = data.copy()
+            trends = {}
+            
+            for period in self.trend_detection_periods:
+                # Calculate EMAs for trend detection
+                ema = talib.EMA(df['close'].values, timeperiod=period)
+                current_ema = ema[-1]
+                prev_ema = ema[-2]
+                
+                # Calculate slope of EMA
+                slope = (current_ema - prev_ema) / prev_ema * 100
+                
+                # Determine trend strength and direction
+                if slope > 1.0:
+                    trends[f'trend_{period}'] = 'strong_uptrend'
+                elif slope > 0.2:
+                    trends[f'trend_{period}'] = 'uptrend'
+                elif slope < -1.0:
+                    trends[f'trend_{period}'] = 'strong_downtrend'
+                elif slope < -0.2:
+                    trends[f'trend_{period}'] = 'downtrend'
+                else:
+                    trends[f'trend_{period}'] = 'sideways'
+            
+            logger.debug("Detected trends: %s", trends)
+            return trends
+            
+        except Exception as e:
+            logger.error("Error detecting trends: %s", str(e))
+            return {}
 
     def calculate_indicators(self, data: pd.DataFrame) -> pd.DataFrame:
-        """Calculate technical indicators using TA-Lib"""
+        """Calculate technical indicators with enhanced trend and SR detection"""
         try:
             df = data.copy()
             
-            # Ensure column names are lowercase
-            df.columns = df.columns.str.lower()
-            
-            # Calculate RSI
-            df['rsi'] = talib.RSI(df['close'], timeperiod=self.rsi_period)
-            
-            # Calculate MACD
-            macd, signal, hist = talib.MACD(
-                df['close'],
-                fastperiod=self.macd_fast,
-                slowperiod=self.macd_slow,
-                signalperiod=self.macd_signal
-            )
+            # Basic indicators
+            df['rsi'] = talib.RSI(df['close'].values, timeperiod=self.rsi_period)
+            macd, signal, hist = talib.MACD(df['close'].values, 
+                                          fastperiod=self.macd_fast,
+                                          slowperiod=self.macd_slow,
+                                          signalperiod=self.macd_signal)
             df['macd'] = macd
             df['macd_signal'] = signal
             df['macd_hist'] = hist
             
-            # Calculate Bollinger Bands
-            bb_upper, bb_middle, bb_lower = talib.BBANDS(
-                df['close'],
-                timeperiod=self.bb_period,
-                nbdevup=self.bb_std,
-                nbdevdn=self.bb_std
-            )
-            df['bb_upper'] = bb_upper
-            df['bb_middle'] = bb_middle
-            df['bb_lower'] = bb_lower
+            # Bollinger Bands
+            upper, middle, lower = talib.BBANDS(df['close'].values,
+                                              timeperiod=self.bb_period,
+                                              nbdevup=self.bb_std,
+                                              nbdevdn=self.bb_std)
+            df['bb_upper'] = upper
+            df['bb_middle'] = middle
+            df['bb_lower'] = lower
             
-            # Calculate other indicators
-            df['sma_50'] = talib.SMA(df['close'], timeperiod=50)
+            # Enhanced indicators
             df['atr'] = talib.ATR(df['high'], df['low'], df['close'], timeperiod=14)
-            df['obv'] = talib.OBV(df['close'], df['volume'])
             df['adx'] = talib.ADX(df['high'], df['low'], df['close'], timeperiod=14)
+            df['obv'] = talib.OBV(df['close'], df['volume'])
             
+            # Trend indicators
+            for period in self.trend_detection_periods:
+                df[f'sma_{period}'] = talib.SMA(df['close'], timeperiod=period)
+                df[f'ema_{period}'] = talib.EMA(df['close'], timeperiod=period)
+            
+            # Calculate support/resistance and trends
+            self.support_levels, self.resistance_levels = self.calculate_support_resistance(df)
+            self.trends = self.detect_trends(df)
+            
+            # Add SR and trend info to dataframe
+            for level, value in self.support_levels.items():
+                df[f'support_{level}'] = value
+            for level, value in self.resistance_levels.items():
+                df[f'resistance_{level}'] = value
+            for period, trend in self.trends.items():
+                df[f'trend_{period}'] = trend
+            
+            logger.debug("Calculated indicators for data shape: %s", df.shape)
             return df
             
         except Exception as e:
-            logger.error(f"Error calculating indicators: {str(e)}")
+            logger.error("Error calculating indicators: %s", str(e))
             raise
 
     def build_model(self, input_shape, model_type='lstm'):
@@ -448,12 +537,17 @@ class TradingEnvironment(gym.Env):
     
     metadata = {'render.modes': ['human']}
     
-    def __init__(self, df: pd.DataFrame, initial_balance: float = 100000.0):
+    def __init__(self, df: pd.DataFrame, config: Dict[str, Any]):
         super(TradingEnvironment, self).__init__()
         
-        # Drop non-numeric columns for now
-        numerical_cols = ['open', 'high', 'low', 'close', 'volume', 'SMA_20', 'Daily_Return']
-        self.df = df[numerical_cols].copy()
+        self.config = config
+        env_config = config.get('env', {})
+        
+        # Get columns from config or use defaults
+        self.numerical_cols = env_config.get('features', [
+            'open', 'high', 'low', 'close', 'volume', 'SMA_20', 'Daily_Return'
+        ])
+        self.df = df[self.numerical_cols].copy()
         
         # Initialize scalers
         self.scalers = {}
@@ -461,18 +555,27 @@ class TradingEnvironment(gym.Env):
             self.scalers[col] = StandardScaler()
             self.df[col] = self.scalers[col].fit_transform(self.df[col].values.reshape(-1, 1))
         
-        self.initial_balance = initial_balance
+        # Get trading parameters from config
+        self.initial_balance = env_config.get('initial_balance', 100000.0)
+        self.buy_cost_pct = env_config.get('buy_cost_pct', 0.001)  # 0.1% trading cost
+        self.sell_cost_pct = env_config.get('sell_cost_pct', 0.001)
+        self.max_position = env_config.get('max_position', 0.9)  # Maximum amount to invest
+        
+        # Initialize trading state
         self.current_step = 0
+        self.balance = self.initial_balance
+        self.shares_held = 0
+        self.cost_basis = 0
+        self.total_shares_sold = 0
+        self.total_sales_value = 0
+        self.returns = []
         
         # Define action and observation spaces
         self.action_space = spaces.Discrete(3)  # Buy (1), Sell (2), Hold (0)
-        
-        # Features: OHLCV + technical indicators
-        n_features = len(self.df.columns)
         self.observation_space = spaces.Box(
             low=-np.inf, 
             high=np.inf, 
-            shape=(n_features,),
+            shape=(len(self.numerical_cols),),
             dtype=np.float32
         )
         
@@ -511,28 +614,39 @@ class TradingEnvironment(gym.Env):
         
     def _take_action(self, action):
         """Execute the trading action"""
-        # Get the original (unscaled) close price for trading
         current_price = self.scalers['close'].inverse_transform(
             self.df.iloc[self.current_step]['close'].reshape(-1, 1)
         )[0][0]
         
         if action == 1:  # Buy
-            # Buy with 90% of current balance
-            shares_to_buy = int((self.balance * 0.9) / current_price)
-            self.shares_held += shares_to_buy
-            self.balance -= shares_to_buy * current_price
-            self.cost_basis = current_price
+            # Calculate max shares we can buy
+            max_shares = int((self.balance * self.max_position) / (
+                current_price * (1 + self.buy_cost_pct)
+            ))
             
+            # Buy shares if we can afford at least one
+            if max_shares > 0:
+                shares_bought = max_shares
+                purchase_cost = shares_bought * current_price * (1 + self.buy_cost_pct)
+                self.balance -= purchase_cost
+                self.shares_held += shares_bought
+                self.cost_basis = current_price
+                
         elif action == 2:  # Sell
-            self.balance += self.shares_held * current_price
-            self.total_shares_sold += self.shares_held
-            self.total_sales_value += self.shares_held * current_price
-            self.shares_held = 0
-            self.cost_basis = 0
+            if self.shares_held > 0:
+                # Calculate sale proceeds with transaction cost
+                sale_proceeds = self.shares_held * current_price * (1 - self.sell_cost_pct)
+                self.balance += sale_proceeds
+                self.total_shares_sold += self.shares_held
+                self.total_sales_value += sale_proceeds
+                self.shares_held = 0
+                self.cost_basis = 0
 
     def _calculate_reward(self, action):
         """Calculate reward for the action taken"""
-        # Get the original (unscaled) close prices for reward calculation
+        reward_config = self.config.get('env', {}).get('rewards', {})
+        
+        # Get the original (unscaled) close price for reward calculation
         current_price = self.scalers['close'].inverse_transform(
             self.df.iloc[self.current_step]['close'].reshape(-1, 1)
         )[0][0]
@@ -542,35 +656,48 @@ class TradingEnvironment(gym.Env):
                 self.df.iloc[self.current_step - 1]['close'].reshape(-1, 1)
             )[0][0]
             price_change = (current_price - prev_price) / prev_price
-            # Clip price change to prevent extreme values
-            price_change = np.clip(price_change, -0.1, 0.1)
+            # Clip price change based on config
+            price_change = np.clip(
+                price_change,
+                reward_config.get('min_price_change', -0.1),
+                reward_config.get('max_price_change', 0.1)
+            )
         else:
             price_change = 0
             
         # Calculate position value change
         position_value = self.shares_held * current_price + self.balance
         value_change = (position_value - self.initial_balance) / self.initial_balance
-        # Clip value change to prevent extreme values
-        value_change = np.clip(value_change, -1.0, 1.0)
+        value_change = np.clip(
+            value_change,
+            reward_config.get('min_value_change', -1.0),
+            reward_config.get('max_value_change', 1.0)
+        )
         
-        # Base reward on returns
+        # Base reward on returns with configurable weights
         reward = 0
+        weights = reward_config.get('action_weights', {
+            'buy': {'gain': 1.0, 'loss': 0.5},
+            'sell': {'gain': 1.0, 'loss': 0.5},
+            'hold': {'multiplier': 0.1}
+        })
         
         if action == 1:  # Buy
-            # Reward for buying before price increase
-            reward = price_change if price_change > 0 else -abs(price_change) * 0.5
+            reward = price_change if price_change > 0 else -abs(price_change) * weights['buy']['loss']
         elif action == 2:  # Sell
-            # Reward for selling before price decrease
-            reward = -price_change if price_change < 0 else -abs(price_change) * 0.5
+            reward = -price_change if price_change < 0 else -abs(price_change) * weights['sell']['loss']
         else:  # Hold
-            # Small negative reward for holding to encourage action
-            reward = price_change * 0.1
+            reward = price_change * weights['hold']['multiplier']
         
         # Add scaled position value change to reward
         self.returns.append(value_change)
-        reward = np.clip(reward + value_change * 0.5, -1.0, 1.0)
+        reward = np.clip(
+            reward + value_change * reward_config.get('value_change_weight', 0.5),
+            reward_config.get('min_reward', -1.0),
+            reward_config.get('max_reward', 1.0)
+        )
         
-        return float(reward)  # Ensure reward is a float
+        return float(reward)
     
     def _get_info(self):
         """Get current trading information"""

@@ -1,15 +1,52 @@
+import sys
+import os
+
+# Add site-packages to path
+python_path = os.path.dirname(os.__file__)
+site_packages = os.path.join(python_path, 'site-packages')
+if site_packages not in sys.path:
+    sys.path.append(site_packages)
+
 import logging
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Tuple, Any, Optional
-import tensorflow as tf
-from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import TimeSeriesSplit
 from datetime import datetime, timedelta
-import optuna
-import talib
+
+# Configure TensorFlow logging
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TF logging
+os.environ['CUDA_VISIBLE_DEVICES'] = '-1'  # Force CPU usage
 
 logger = logging.getLogger(__name__)
+
+def get_tf():
+    """Lazy load TensorFlow to handle import issues gracefully"""
+    try:
+        import tensorflow as tf
+        tf.get_logger().setLevel('ERROR')
+        return tf
+    except ImportError as e:
+        logger.error(f"TensorFlow initialization failed: {e}")
+        return None
+
+def get_sklearn():
+    """Lazy load scikit-learn components"""
+    try:
+        from sklearn.preprocessing import StandardScaler
+        from sklearn.model_selection import TimeSeriesSplit
+        return StandardScaler, TimeSeriesSplit
+    except ImportError as e:
+        logger.error(f"Scikit-learn import failed: {e}")
+        return None, None
+
+def get_talib():
+    """Lazy load TA-Lib"""
+    try:
+        import talib
+        return talib
+    except ImportError as e:
+        logger.error(f"TA-Lib import failed: {e}")
+        return None
 
 class TrainingPipeline:
     def __init__(self, config: Dict[str, Any]):
@@ -17,11 +54,26 @@ class TrainingPipeline:
         self.X = None
         self.y = None
         self.model = None
-        self.scaler = StandardScaler()
+        
+        # Initialize dependencies
+        self.tf = get_tf()
+        StandardScaler, _ = get_sklearn()
+        self.scaler = StandardScaler() if StandardScaler else None
+        self.talib = get_talib()
+        
+        if self.tf is None:
+            logger.warning("TensorFlow not available. Model training will be disabled.")
+        if self.scaler is None:
+            logger.warning("Scikit-learn not available. Data preprocessing will be limited.")
+        if self.talib is None:
+            logger.warning("TA-Lib not available. Technical analysis features will be limited.")
 
     def preprocess_data(self, data: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
         """Preprocess data for model training"""
         try:
+            if self.scaler is None:
+                raise ImportError("Scikit-learn StandardScaler not available")
+                
             # Calculate features first
             features = self.engineer_features(data)
             
@@ -39,7 +91,7 @@ class TrainingPipeline:
             
             return X, y
         except Exception as e:
-            logger.error(f"Error preprocessing data: {str(e)}")
+            logger.error(f"Error preprocessing data: {e}")
             raise
 
     def engineer_features(self, data: pd.DataFrame) -> pd.DataFrame:
@@ -47,166 +99,114 @@ class TrainingPipeline:
         try:
             df = data.copy()
             
-            # Ensure OHLCV columns exist
-            required_cols = ['open', 'high', 'low', 'close', 'volume']
-            if not all(col in df.columns for col in required_cols):
-                raise ValueError(f"Missing required columns. Need: {required_cols}")
-
-            # Technical Indicators
-            df['sma_10'] = talib.SMA(df['close'], timeperiod=10)
-            df['sma_20'] = talib.SMA(df['close'], timeperiod=20)
-            df['sma_50'] = talib.SMA(df['close'], timeperiod=50)
-            
-            df['rsi'] = talib.RSI(df['close'], timeperiod=14)
-            
-            macd, macd_signal, _ = talib.MACD(df['close'])
-            df['macd'] = macd
-            df['macd_signal'] = macd_signal
-            
-            upper, middle, lower = talib.BBANDS(df['close'])
-            df['bb_upper'] = upper
-            df['bb_middle'] = middle
-            df['bb_lower'] = lower
-            
-            # Volatility and Volume
-            df['atr'] = talib.ATR(df['high'], df['low'], df['close'])
-            df['volume_sma'] = talib.SMA(df['volume'], timeperiod=20)
-            
-            # Price based features
-            df['returns'] = df['close'].pct_change()
-            df['log_returns'] = np.log1p(df['returns'])
-            
-            # Target variable (next day return)
-            df['target'] = df['returns'].shift(-1)
+            if self.talib:
+                # Technical indicators using TA-Lib
+                df['sma_10'] = self.talib.SMA(df['close'], timeperiod=10)
+                df['sma_20'] = self.talib.SMA(df['close'], timeperiod=20)
+                df['sma_50'] = self.talib.SMA(df['close'], timeperiod=50)
+                df['rsi'] = self.talib.RSI(df['close'], timeperiod=14)
+                
+                macd, macd_signal, _ = self.talib.MACD(df['close'])
+                df['macd'] = macd
+                df['macd_signal'] = macd_signal
+                
+                upper, middle, lower = self.talib.BBANDS(df['close'])
+                df['bb_upper'] = upper
+                df['bb_middle'] = middle
+                df['bb_lower'] = lower
+                
+                df['atr'] = self.talib.ATR(df['high'], df['low'], df['close'])
+                df['volume_sma'] = self.talib.SMA(df['volume'], timeperiod=20)
+            else:
+                # Fallback to basic calculations if TA-Lib is not available
+                df['returns'] = df['close'].pct_change()
+                df['volume_ma'] = df['volume'].rolling(window=20).mean()
             
             return df
-            
         except Exception as e:
-            logger.error(f"Error engineering features: {str(e)}")
+            logger.error(f"Error engineering features: {e}")
             raise
 
-    def build_model(self, input_dim: int) -> tf.keras.Model:
-        """Build and compile the neural network model"""
+    def build_model(self, input_dim: int) -> Optional[Any]:
+        """Build the neural network model"""
+        if self.tf is None:
+            logger.error("TensorFlow not available. Cannot build model.")
+            return None
+
         try:
-            model = tf.keras.Sequential([
-                tf.keras.layers.Input(shape=(input_dim,)),
-                tf.keras.layers.Dense(64, activation='relu'),
-                tf.keras.layers.BatchNormalization(),
-                tf.keras.layers.Dropout(0.2),
-                tf.keras.layers.Dense(32, activation='relu'),
-                tf.keras.layers.BatchNormalization(),
-                tf.keras.layers.Dropout(0.1),
-                tf.keras.layers.Dense(1, activation='tanh')
+            model = self.tf.keras.Sequential([
+                self.tf.keras.layers.Dense(64, activation='relu', input_shape=(input_dim,)),
+                self.tf.keras.layers.Dropout(0.2),
+                self.tf.keras.layers.Dense(32, activation='relu'),
+                self.tf.keras.layers.Dropout(0.1),
+                self.tf.keras.layers.Dense(1)
             ])
             
             model.compile(
-                optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+                optimizer='adam',
                 loss='mse',
                 metrics=['mae']
             )
             
             return model
-            
         except Exception as e:
-            logger.error(f"Error building model: {str(e)}")
-            raise
+            logger.error(f"Error building model: {e}")
+            return None
 
-    def train(self, X: np.ndarray, y: np.ndarray) -> tf.keras.Model:
-        """Train the model with given data"""
+    def train(self, X: np.ndarray, y: np.ndarray) -> Optional[Any]:
+        """Train the model with error handling"""
+        if self.tf is None:
+            logger.error("TensorFlow not available. Cannot train model.")
+            return None
+
         try:
+            if X is None or y is None:
+                raise ValueError("Training data not properly initialized")
+
             self.model = self.build_model(X.shape[1])
-            
-            early_stopping = tf.keras.callbacks.EarlyStopping(
-                monitor='val_loss',
-                patience=10,
-                restore_best_weights=True
-            )
-            
+            if self.model is None:
+                raise ValueError("Model initialization failed")
+
             history = self.model.fit(
                 X, y,
-                epochs=self.config.get('model', {}).get('epochs', 100),
+                epochs=self.config.get('model', {}).get('epochs', 50),
                 batch_size=self.config.get('model', {}).get('batch_size', 32),
                 validation_split=0.2,
-                callbacks=[early_stopping],
                 verbose=1
             )
             
-            return self.model
-            
+            return history
         except Exception as e:
-            logger.error(f"Error training model: {str(e)}")
-            raise
+            logger.error(f"Error training model: {e}")
+            return None
 
-    def hyperparameter_tune(self, trials: int = 100) -> Dict[str, Any]:
-        """Perform hyperparameter tuning using Optuna"""
-        try:
-            def objective(trial):
-                # Define hyperparameters to tune
-                lr = trial.suggest_loguniform('learning_rate', 1e-5, 1e-2)
-                units_1 = trial.suggest_int('units_1', 32, 128)
-                units_2 = trial.suggest_int('units_2', 16, 64)
-                dropout_1 = trial.suggest_uniform('dropout_1', 0.1, 0.5)
-                dropout_2 = trial.suggest_uniform('dropout_2', 0.1, 0.3)
-                
-                # Build model with trial parameters
-                model = tf.keras.Sequential([
-                    tf.keras.layers.Input(shape=(self.X.shape[1],)),
-                    tf.keras.layers.Dense(units_1, activation='relu'),
-                    tf.keras.layers.BatchNormalization(),
-                    tf.keras.layers.Dropout(dropout_1),
-                    tf.keras.layers.Dense(units_2, activation='relu'),
-                    tf.keras.layers.BatchNormalization(),
-                    tf.keras.layers.Dropout(dropout_2),
-                    tf.keras.layers.Dense(1, activation='tanh')
-                ])
-                
-                model.compile(
-                    optimizer=tf.keras.optimizers.Adam(learning_rate=lr),
-                    loss='mse',
-                    metrics=['mae']
-                )
-                
-                # Train and evaluate
-                history = model.fit(
-                    self.X, self.y,
-                    epochs=50,
-                    batch_size=32,
-                    validation_split=0.2,
-                    verbose=0
-                )
-                
-                return min(history.history['val_loss'])
-            
-            # Create and run study
-            study = optuna.create_study(direction='minimize')
-            study.optimize(objective, n_trials=trials)
-            
-            return study.best_params
-            
-        except Exception as e:
-            logger.error(f"Error during hyperparameter tuning: {str(e)}")
-            raise
-
-    def save_model(self, path: str):
+    def save_model(self, path: str) -> bool:
         """Save the trained model"""
-        try:
-            if self.model is None:
-                raise ValueError("No model to save")
-            self.model.save(path)
-            logger.info(f"Model saved to {path}")
-        except Exception as e:
-            logger.error(f"Error saving model: {str(e)}")
-            raise
+        if self.model is None:
+            logger.error("No model to save")
+            return False
 
-    def load_model(self, path: str):
-        """Load a trained model"""
         try:
-            self.model = tf.keras.models.load_model(path)
-            logger.info(f"Model loaded from {path}")
-            return self.model
+            self.model.save(path)
+            logger.info(f"Model saved successfully to {path}")
+            return True
         except Exception as e:
-            logger.error(f"Error loading model: {str(e)}")
-            raise
+            logger.error(f"Error saving model: {e}")
+            return False
+
+    def load_model(self, path: str) -> bool:
+        """Load a trained model"""
+        if self.tf is None:
+            logger.error("TensorFlow not available. Cannot load model.")
+            return False
+
+        try:
+            self.model = self.tf.keras.models.load_model(path)
+            logger.info(f"Model loaded successfully from {path}")
+            return True
+        except Exception as e:
+            logger.error(f"Error loading model: {e}")
+            return False
 
     def prepare_training_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Prepare data for model training"""
@@ -226,8 +226,13 @@ class TrainingPipeline:
             all_data = []
             for symbol in symbols:
                 try:
-                    # Convert Angel One symbol format to NSE format
-                    nse_symbol = symbol.replace('-EQ', '.NS')
+                    # Handle symbol format conversion
+                    if '-EQ' in symbol:
+                        nse_symbol = symbol.replace('-EQ', '.NS')
+                    elif '.NS' in symbol:
+                        nse_symbol = symbol
+                    else:
+                        nse_symbol = f"{symbol}.NS"
                     
                     # Get 1 year of historical data
                     end_date = datetime.now()
@@ -241,11 +246,16 @@ class TrainingPipeline:
                     )
                     
                     if not data.empty:
+                        # Ensure numeric data types
+                        numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+                        data[numeric_cols] = data[numeric_cols].astype(float)
+                        
+                        # Store original symbol for reference
                         data['symbol'] = symbol
                         all_data.append(data)
+                        logger.info(f"Successfully fetched data for {symbol}")
                     else:
                         logger.warning(f"No historical data available for {symbol}")
-                        
                 except Exception as e:
                     logger.error(f"Error fetching data for {symbol}: {str(e)}")
                     continue
@@ -265,7 +275,6 @@ class TrainingPipeline:
             
             logger.info(f"Prepared training data with {len(training_data)} records")
             return training_data, market_data
-            
         except Exception as e:
             logger.error(f"Error preparing training data: {str(e)}")
             raise
@@ -273,19 +282,22 @@ class TrainingPipeline:
     def get_default_models(self) -> Dict[str, Any]:
         """Get default models when training data is not available"""
         try:
+            if self.tf is None:
+                raise ImportError("TensorFlow not available")
+
             # Create minimal models with default parameters
             models = {
-                'price_prediction': tf.keras.Sequential([
-                    tf.keras.layers.Dense(64, activation='relu', input_shape=(10,)),
-                    tf.keras.layers.Dropout(0.2),
-                    tf.keras.layers.Dense(32, activation='relu'),
-                    tf.keras.layers.Dense(1)
+                'price_prediction': self.tf.keras.Sequential([
+                    self.tf.keras.layers.Dense(64, activation='relu', input_shape=(10,)),
+                    self.tf.keras.layers.Dropout(0.2),
+                    self.tf.keras.layers.Dense(32, activation='relu'),
+                    self.tf.keras.layers.Dense(1)
                 ]),
-                'trend_prediction': tf.keras.Sequential([
-                    tf.keras.layers.Dense(64, activation='relu', input_shape=(10,)),
-                    tf.keras.layers.Dropout(0.2),
-                    tf.keras.layers.Dense(32, activation='relu'),
-                    tf.keras.layers.Dense(3, activation='softmax')
+                'trend_prediction': self.tf.keras.Sequential([
+                    self.tf.keras.layers.Dense(64, activation='relu', input_shape=(10,)),
+                    self.tf.keras.layers.Dropout(0.2),
+                    self.tf.keras.layers.Dense(32, activation='relu'),
+                    self.tf.keras.layers.Dense(3, activation='softmax')
                 ])
             }
             
@@ -304,7 +316,95 @@ class TrainingPipeline:
             
             logger.info("Created default models")
             return models
-            
         except Exception as e:
             logger.error(f"Error creating default models: {str(e)}")
             raise
+
+    def train_models(self, data: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
+        """Train and return the machine learning models"""
+        try:
+            if self.tf is None:
+                raise ImportError("TensorFlow not available")
+
+            if data is not None:
+                X, y = self.preprocess_data(data)
+            elif self.X is not None and self.y is not None:
+                X, y = self.X, self.y
+            else:
+                logger.warning("No data available for training")
+                return self.get_default_models()
+
+            # Train models
+            models = {}
+            
+            # LSTM model for sequence prediction
+            models['lstm'] = self._train_lstm_model(X, y)
+            
+            # Feed-forward neural network for classification
+            models['ffnn'] = self._train_ffnn_model(X, y)
+            
+            logger.info("Successfully trained all models")
+            return models
+        except Exception as e:
+            logger.error(f"Error training models: {str(e)}")
+            logger.warning("Using default models instead")
+            return self.get_default_models()
+
+    def _train_lstm_model(self, X: np.ndarray, y: np.ndarray) -> Any:
+        """Train LSTM model for sequence prediction"""
+        try:
+            if self.tf is None:
+                raise ImportError("TensorFlow not available")
+
+            # Reshape data for LSTM [samples, timesteps, features]
+            seq_length = self.config.get('ai', {}).get('lstm_seq_length', 10)
+            X_lstm = self._prepare_sequences(X, seq_length)
+            y_lstm = y[seq_length:]
+            
+            # Build LSTM model
+            model = self.tf.keras.Sequential([
+                self.tf.keras.layers.LSTM(64, input_shape=(seq_length, X.shape[1])),
+                self.tf.keras.layers.Dense(32, activation='relu'),
+                self.tf.keras.layers.Dense(1, activation='sigmoid')
+            ])
+            
+            model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+            
+            # Train model
+            model.fit(X_lstm, y_lstm, epochs=10, batch_size=32, validation_split=0.2, verbose=0)
+            
+            return model
+        except Exception as e:
+            logger.error(f"Error training LSTM model: {str(e)}")
+            return None
+
+    def _train_ffnn_model(self, X: np.ndarray, y: np.ndarray) -> Any:
+        """Train feed-forward neural network for classification"""
+        try:
+            if self.tf is None:
+                raise ImportError("TensorFlow not available")
+
+            # Build FFNN model
+            model = self.tf.keras.Sequential([
+                self.tf.keras.layers.Dense(64, activation='relu', input_shape=(X.shape[1],)),
+                self.tf.keras.layers.Dropout(0.2),
+                self.tf.keras.layers.Dense(32, activation='relu'),
+                self.tf.keras.layers.Dense(1, activation='sigmoid')
+            ])
+            
+            model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+            
+            # Train model
+            model.fit(X, y, epochs=10, batch_size=32, validation_split=0.2, verbose=0)
+            
+            return model
+        except Exception as e:
+            logger.error(f"Error training FFNN model: {str(e)}")
+            return None
+
+    def _prepare_sequences(self, data: np.ndarray, seq_length: int) -> np.ndarray:
+        """Prepare sequences for LSTM model"""
+        sequences = []
+        for i in range(len(data) - seq_length):
+            sequences.append(data[i:(i + seq_length)])
+        return np.array(sequences)

@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Tuple, Any
 import pandas as pd
 from SmartApi import SmartConnect  # Using the official import style
 from src.data.collector import DataCollector
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +36,9 @@ class TradeManager:
         self.data_collector = data_collector or DataCollector(config)
         self.positions = {}
         self.trade_history = []
-        self.account_value = config.get('initial_account_value', 100000)
         self.logger = logging.getLogger(__name__)
         self.risk_manager = RiskManager(config)
-        logger.info(f"TradeManager initialized with initial capital: {self.account_value}")
+        self._initialize_account_value()  # Initialize account value based on mode
 
     def place_trade(self, symbol: str, action: str, quantity: int, price: float, stop_loss: float, target: float) -> Dict[str, Any]:
         """Place a new trade"""
@@ -344,15 +344,18 @@ class TradeManager:
         except Exception as e:
             self.logger.error(f"Error closing position: {str(e)}")
             raise
-
     def get_portfolio_value(self) -> float:
         """Calculate total portfolio value."""
         try:
+            # In live mode, get value from Angel One API
+            if self.config['trading']['mode'] == 'live':
+                return self._get_angel_portfolio_balance()
+
+            # In simulation mode, calculate from account value and positions
             total_value = self.account_value
-            
             for symbol, position in self.positions.items():
-                if position['status'] == 'OPEN':
-                    current_price = self.data_collector.get_latest_price(symbol)
+                if position['status'].upper() == 'OPEN':
+                    current_price = self.data_collector.get_ltp(symbol)
                     if current_price:
                         position_value = position['quantity'] * current_price
                         if position['action'] == 'BUY':
@@ -397,3 +400,83 @@ class TradeManager:
         except Exception as e:
             self.logger.error(f"Error executing trade: {str(e)}")
             raise
+
+    def get_daily_pnl(self) -> float:
+        """Calculate daily profit and loss"""
+        try:
+            total_pnl = 0.0
+            today = datetime.now().date()
+            
+            # Calculate realized P&L from today's closed trades
+            for trade in self.trade_history:
+                if trade.get('exit_timestamp') and trade['exit_timestamp'].date() == today:
+                    if trade['action'] == 'BUY':
+                        pnl = (trade['exit_price'] - trade['entry_price']) * trade['quantity']
+                    else:  # SELL
+                        pnl = (trade['entry_price'] - trade['exit_price']) * trade['quantity']
+                    total_pnl += pnl
+              # Calculate unrealized P&L for open positions opened today
+            for symbol, position in self.positions.items():
+                if position['status'] == 'open' and position.get('timestamp', datetime.now()).date() == today:
+                    current_price = self.data_collector.get_ltp(symbol)
+                    if current_price:
+                        if position['action'] == 'BUY':
+                            pnl = (current_price - position['entry_price']) * position['quantity']
+                        else:  # SELL
+                            pnl = (position['entry_price'] - current_price) * position['quantity']
+                        total_pnl += pnl
+            
+            return round(total_pnl, 2)
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating daily PnL: {str(e)}")
+            return 0.0
+
+    def _get_angel_portfolio_balance(self) -> float:
+        """Get portfolio balance from Angel One API in live mode"""
+        try:
+            if not self.data_collector or not hasattr(self.data_collector, 'angel_api'):
+                logger.warning("Angel One API not initialized")
+                return 0.0
+
+            response = self.data_collector.angel_api.portfolio()
+            if response and response.get('status') and response.get('data'):
+                portfolio_data = response['data']
+                # Get available balance + stocks value
+                available_balance = float(portfolio_data.get('availablecash', 0))
+                stocks_value = float(portfolio_data.get('net', 0))  # Net portfolio value
+                return available_balance + stocks_value
+            else:
+                logger.error(f"Failed to get portfolio data: {response}")
+                return 0.0
+
+        except Exception as e:
+            logger.error(f"Error getting Angel One portfolio balance: {str(e)}")
+            return 0.0
+
+    def _save_account_value(self) -> None:
+        """Save current account value to config file in simulation mode"""
+        try:
+            if self.config['trading']['mode'] == 'simulation':
+                self.config['initial_account_value'] = self.account_value
+                config_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'config.yaml')
+                with open(config_file, 'w') as f:
+                    yaml.dump(self.config, f)
+                logger.info(f"Saved account value {self.account_value} to config")
+        except Exception as e:
+            logger.error(f"Error saving account value: {str(e)}")
+
+    def _initialize_account_value(self) -> None:
+        """Initialize account value based on trading mode"""
+        try:
+            if self.config['trading']['mode'] == 'live':
+                # Get real portfolio value from Angel One
+                self.account_value = self._get_angel_portfolio_balance()
+                logger.info(f"Initialized live account value: {self.account_value}")
+            else:
+                # Use value from config for simulation mode
+                self.account_value = self.config.get('initial_account_value', 100000)
+                logger.info(f"Initialized simulation account value: {self.account_value}")
+        except Exception as e:
+            logger.error(f"Error initializing account value: {str(e)}")
+            self.account_value = self.config.get('initial_account_value', 100000)

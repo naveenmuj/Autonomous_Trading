@@ -196,9 +196,67 @@ model:
     n_epochs: 10
     gamma: 0.99
     device: "auto" # Can be "cpu", "cuda", or "auto"
+    clip_range: 0.2
+    ent_coef: 0.01
+    gae_lambda: 0.95
+    max_grad_norm: 0.5
+    target_kl: 0.015
+    update_epochs: 4
+    warmup_steps: 1000
 
   architecture:
     policy: "MlpPolicy"
+    policy_kwargs:
+      net_arch:
+        pi: [ 128, 128 ] # Policy network
+        vf: [ 128, 128 ] # Value function network
+      activation_fn: "tanh"
+      ortho_init: true
+      log_std_init: -2
+
+  env:
+    features:
+    - open
+    - high
+    - low
+    - close
+    - volume
+    - SMA_20
+    - Daily_Return
+    - RSI
+    - MACD
+    - BB_upper
+    - BB_lower
+    trading:
+      initial_balance: 50000.0
+      buy_cost_pct: 0.001 # 0.1% trading cost
+      sell_cost_pct: 0.001
+      max_position: 0.9 # Maximum amount to invest
+      max_trades: 5
+      min_trade_amount: 1000
+    rewards:
+      min_price_change: -0.1
+      max_price_change: 0.1
+      min_value_change: -1
+      max_value_change: 1.0
+      min_reward: -1
+      max_reward: 1.0
+      value_change_weight: 0.5
+      action_weights:
+        buy:
+          gain: 1.0
+          loss: 0.5
+        sell:
+          gain: 1.0
+          loss: 0.5
+        hold:
+          multiplier: 0.1
+    constraints:
+      max_position_size: 0.2 # Maximum 20% of portfolio in one position
+      max_trades_per_episode: 10
+      min_holding_period: 5 # Minimum holding period in steps
+      max_holding_period: 100 # Maximum holding period in steps
+      max_drawdown: 0.15 # Maximum 15% drawdown
     net_arch:
       pi: [ 64, 64 ] # Policy network
       vf: [ 64, 64 ] # Value function network

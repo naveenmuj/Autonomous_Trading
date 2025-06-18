@@ -6,20 +6,20 @@ import pandas as pd
 import numpy as np
 from unittest.mock import MagicMock, patch
 from datetime import datetime, timedelta
+from typing import Dict, Any
 
-# Add mocks directory to path
-mocks_dir = os.path.join(os.path.dirname(__file__), 'mocks')
-sys.path.insert(0, mocks_dir)
+# Import our mocks
+from tests.mocks.smartapi_mock import SmartConnect
+from tests.mocks.mock_smartwebsocket import MockSmartWebSocketV2
 
-# Import our mock
-from smartapi_mock import SmartConnect
-
-# Create mock module
+# Create mock modules
 mock_smartapi = MagicMock()
 mock_smartapi.SmartConnect = SmartConnect
 sys.modules['smartapi'] = mock_smartapi
-from typing import Dict, Any, Optional
-import yfinance as yf
+
+mock_websocket = MagicMock()
+mock_websocket.SmartWebSocketV2 = MockSmartWebSocketV2
+sys.modules['SmartApi.smartWebSocketV2'] = mock_websocket
 
 # Add project root and src to Python path
 root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))

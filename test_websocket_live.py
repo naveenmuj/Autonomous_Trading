@@ -25,18 +25,31 @@ def signal_handler(signum, frame):
     logger.info("\nReceived interrupt signal. Cleaning up...")
     running = False
 
-def on_market_data(tick_data):
+def on_market_data(tick_data: dict):
     """Callback function for market data updates"""
-    current_time = datetime.now(pytz.timezone('Asia/Kolkata'))
-    
-    # Print market data update
-    logger.info(f"\nMarket Data Update at {current_time.strftime('%Y-%m-%d %H:%M:%S')}:")
-    logger.info(f"Symbol: {tick_data['symbol']}")
-    logger.info(f"LTP: {tick_data['ltp']}")
-    logger.info(f"Volume: {tick_data['volume']}")
-    logger.info(f"Bid/Ask: {tick_data['bid_price']}/{tick_data['ask_price']}")
+    try:
+        # Format the output similar to test_angel_one_websocket.py
+        print("\033[H\033[2J", end="")  # Clear screen
+        print("\n" + "═" * 50)
+        print(f"  MARKET DATA UPDATE")
+        print("═" * 50)
+        print(f"  Time: {tick_data['timestamp'].strftime('%H:%M:%S')}")
+        print(f"  Token: {tick_data['token']}")
+        print(f"  LTP: ₹{tick_data['ltp']:,.2f}")
+        if 'bid_price' in tick_data and 'ask_price' in tick_data:
+            print(f"  Bid/Ask: ₹{tick_data['bid_price']:,.2f} / ₹{tick_data['ask_price']:,.2f}")
+        if 'volume' in tick_data:
+            print(f"  Volume: {tick_data['volume']:,}")
+        if 'oi' in tick_data:
+            print(f"  Open Interest: {tick_data['oi']:,}")
+        print("═" * 50)
+        print("\nPress Ctrl+C to exit")
+        
+    except Exception as e:
+        logger.error(f"Error in market data callback: {str(e)}")
 
 def main():
+    """Main test function"""
     global running
     collector = None
     
@@ -49,12 +62,6 @@ def main():
         with open('config.yaml', 'r') as f:
             config = yaml.safe_load(f)
             
-        # Ensure trading config sections exist
-        if 'trading' not in config:
-            config['trading'] = {}
-        if 'data' not in config['trading']:
-            config['trading']['data'] = {'mode': 'manual', 'manual_symbols': []}
-
         # Check market hours
         if not is_market_open():
             wait_time = format_time_until_market_open()
@@ -67,7 +74,7 @@ def main():
         # Wait briefly for WebSocket connection to establish
         time.sleep(2)
         
-        if not collector.websocket or not collector.websocket.is_connected:
+        if not collector.websocket or not collector.websocket.connection_state != collector.websocket.CONNECTED:
             raise Exception("WebSocket connection failed to establish")
             
         # Register our callback with the websocket
