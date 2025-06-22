@@ -76,9 +76,12 @@ class DataCollector:
         self._watchlist_cache = None
         self._watchlist_cache_time = 0
         self._watchlist_cache_ttl = 300  # 5 minutes
-        
-        # Rate limiting
-        self._rate_limiter = RateLimiter(rate=3, burst=5)  # More conservative values
+        self._historical_cache = {}  # (symbol, interval, days) -> DataFrame
+        # Rate limiting (configurable)
+        rate_limit_cfg = config.get('api', {}).get('rate_limit', {})
+        rate = rate_limit_cfg.get('rate', 3)
+        burst = rate_limit_cfg.get('burst', 5)
+        self._rate_limiter = RateLimiter(rate=rate, burst=burst)  # More conservative values
         
         # Initialize API
         self._initialize_api()
@@ -224,26 +227,17 @@ class DataCollector:
         logger.info("Session renewal timer started")
         
     def _initialize_token_mapping(self):
-        """Initialize token mapping for configured symbols"""
+        """Initialize token mapping for configured symbols with robust symbol variant matching"""
         try:
             logger.info("Initializing token mapping...")
-              # Define symbol mappings for standardization
             self.symbol_mappings = {
                 'HDFC.NS': 'HDFCBANK.NS',
                 'ICICI.NS': 'ICICIBANK.NS'
             }
-            
-            # Get configured symbols based on mode
             mapped_symbols = self.get_symbols_from_config()
-            
-            # Apply symbol mappings
             mapped_symbols = [self.symbol_mappings.get(s, s) for s in mapped_symbols]
-            # Remove duplicates while preserving order
             mapped_symbols = list(dict.fromkeys(mapped_symbols))
-                    
-            # Download instrument file with retry logic
             instrument_url = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
-            
             for attempt in range(3):
                 try:
                     logger.info(f"Downloading instrument file (attempt {attempt + 1}/3)...")
@@ -254,45 +248,39 @@ class DataCollector:
                         break
                 except Exception as e:
                     logger.error(f"Error downloading instrument file: {str(e)}")
-                    if attempt < 2:  # Don't sleep on last attempt
+                    if attempt < 2:
                         time.sleep(2 ** attempt)
             else:
                 raise Exception("Failed to download instrument file after 3 attempts")
-            
-            # Map symbols to tokens
             self.symbol_token_map = {}
             mapped_count = 0
             unmapped_symbols = []
-            
             for symbol in mapped_symbols:
                 base_symbol = symbol.replace('.NS', '')
+                variants = [
+                    base_symbol,
+                    f"{base_symbol}-EQ",
+                    symbol,
+                    symbol.replace('.NS', '-EQ') if symbol.endswith('.NS') else symbol
+                ]
                 token = None
-                
-                # Search for token
                 for instrument in data:
-                    if (instrument['symbol'] == base_symbol or 
-                        instrument['symbol'] == f"{base_symbol}-EQ"):
+                    if instrument['symbol'] in variants:
                         token = instrument['token']
                         self.symbol_token_map[symbol] = token
                         mapped_count += 1
                         logger.debug(f"Mapped {symbol} to token {token}")
                         break
-                        
                 if not token:
                     unmapped_symbols.append(symbol)
-            
             if mapped_count == 0:
                 raise ValueError("No symbols could be mapped to tokens")
-            
             logger.info(f"Successfully mapped {mapped_count}/{len(mapped_symbols)} symbols to tokens")
             if unmapped_symbols:
                 logger.warning(f"Unmapped symbols: {', '.join(unmapped_symbols)}")
-            
-            # Update config with mapped symbols
             trading_config = self.config.get('trading', {})
             trading_config['symbols'] = mapped_symbols
             self.config['trading'] = trading_config
-            
         except Exception as e:
             logger.error(f"Error initializing token mapping: {str(e)}")
             raise
@@ -342,10 +330,18 @@ class DataCollector:
                         'QUOTE': MarketDataWebSocket.MODE_QUOTE,
                         'SNAPQUOTE': MarketDataWebSocket.MODE_SNAPQUOTE
                     }
-                    mode = mode_map.get(
-                        self.config.get('data', {}).get('websocket', {}).get('mode', 'QUOTE').upper(),
-                        MarketDataWebSocket.MODE_QUOTE
-                    )
+                    mode_str = self.config.get('data', {}).get('websocket', {}).get('mode', 'QUOTE')
+                    if isinstance(mode_str, str):
+                        mode_key = mode_str.upper()
+                    elif isinstance(mode_str, int):
+                        # If already int, map to string key
+                        reverse_map = {v: k for k, v in mode_map.items()}
+                        mode_key = reverse_map.get(mode_str, 'QUOTE')
+                        logger.warning(f"WebSocket mode is int: {mode_str}, mapped to '{mode_key}'")
+                    else:
+                        logger.warning(f"WebSocket mode is not a string or int: {mode_str} (type: {type(mode_str)}), defaulting to 'QUOTE'")
+                        mode_key = 'QUOTE'
+                    mode = mode_map.get(mode_key, MarketDataWebSocket.MODE_QUOTE)
                     
                     # Subscribe to all tokens
                     self.websocket.subscribe(
@@ -414,6 +410,11 @@ class DataCollector:
         """
         empty_df = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         
+        cache_key = (symbol, interval, days)
+        if cache_key in self._historical_cache:
+            logger.info(f"Historical data cache hit for {symbol} {interval} {days}d")
+            return self._historical_cache[cache_key].copy()
+        
         try:
             # Get token for symbol
             token = self.symbol_token_map.get(symbol)
@@ -481,6 +482,10 @@ class DataCollector:
                     df = df.reset_index(drop=True)
                     
                     logger.info(f"Successfully fetched {len(df)} records for {symbol}")
+                    
+                    # Cache the result
+                    self._historical_cache[cache_key] = df.copy()
+                    
                     return df
                     
                 except Exception as e:
@@ -840,34 +845,61 @@ class DataCollector:
             return None
         
     def get_symbols_from_config(self) -> List[str]:
-        """Get list of symbols based on trading mode from config"""
+        """Get list of symbols based on trading mode from config, with robust auto-discovery for 'auto' mode using all NSE EQ stocks for swing trading."""
+        import requests
         trading_config = self.config.get('trading', {})
         data_config = trading_config.get('data', {})
         mode = data_config.get('mode', 'manual')
-        
         symbols = []
-        
         if mode == 'manual':
             # Get manually configured symbols
             symbols = data_config.get('manual_symbols', [])
         elif mode == 'auto':
-            # Get auto-configured symbols based on criteria
-            auto_config = data_config.get('auto', {})
-            # In real implementation, you would fetch symbols based on:
-            # - market_caps
-            # - min_volume
-            # - sectors
-            # For now, use a default list
-            symbols = self._get_default_symbols()
-        
-        # Always add configured indices
+            # --- ROBUST: Use all NSE EQ stocks from ScripMaster for swing trading, log structure if fails ---
+            try:
+                instrument_url = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
+                instr_response = requests.get(instrument_url, timeout=30)
+                instr_response.raise_for_status()
+                instruments = instr_response.json()
+                logger.debug(f"Loaded {len(instruments)} instruments from ScripMaster file")
+                # Log all unique instrumenttype values
+                unique_types = set()
+                for inst in instruments:
+                    inst_type = (inst.get('instrumenttype') or inst.get('instrumentType') or '').upper()
+                    unique_types.add(inst_type)
+                logger.warning(f"Unique instrumenttype values in ScripMaster: {sorted(unique_types)}")
+                # Log first 20 non-AMXIDX records
+                non_index = [inst for inst in instruments if (inst.get('instrumenttype') or '').upper() != 'AMXIDX']
+                logger.warning(f"First 20 non-AMXIDX records: {non_index[:20]}")
+                eligible = []
+                for inst in instruments:
+                    exch_seg = (inst.get('exch_seg') or inst.get('exchSeg') or '').upper()
+                    inst_type = (inst.get('instrumenttype') or inst.get('instrumentType') or '')
+                    symbol = (inst.get('symbol') or inst.get('Symbol') or '')
+                    if exch_seg == 'NSE' and inst_type == '' and symbol.endswith('-EQ'):
+                        eligible.append(symbol + '.NS')
+                logger.debug(f"Found {len(eligible)} NSE EQ stocks for swing trading. Example: {eligible[:10]}")
+                if not eligible:
+                    logger.warning("Auto-discovery found no eligible stocks, using manual_symbols as fallback.")
+                    logger.warning(f"First 5 ScripMaster records: {instruments[:5]}")
+                    unique_keys = set()
+                    for rec in instruments[:50]:
+                        unique_keys.update(rec.keys())
+                    logger.warning(f"Unique keys in first 50 records: {sorted(unique_keys)}")
+                    symbols = data_config.get('manual_symbols', self._get_default_symbols())
+                else:
+                    symbols = eligible
+            except Exception as e:
+                logger.error(f"Failed to fetch NSE EQ stocks for auto-discovery: {e}")
+                symbols = data_config.get('manual_symbols', self._get_default_symbols())
+        # Always add configured indices (for live, not for training)
         indices = data_config.get('indices', [])
-        symbols.extend(indices)
-        
+        # Only add indices if not in training context (let training scripts filter them out)
+        if not self.config.get('skip_indices', False):
+            symbols.extend(indices)
         # Remove any excluded symbols
         excluded = data_config.get('exclude_symbols', [])
         symbols = [s for s in symbols if s not in excluded]
-        
         # Remove duplicates while preserving order
         return list(dict.fromkeys(symbols))
         

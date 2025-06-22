@@ -104,9 +104,18 @@ def train_model(config_path='config.yaml'):
     
     # Initialize data collector
     collector = DataCollector(config)    # Get training data for multiple symbols from manual_symbols in config
-    symbols = config.get('trading', {}).get('data', {}).get('manual_symbols', [])
+    # Use DataCollector's symbol selection logic (manual/auto)
+    config['skip_indices'] = True
+    symbols = collector.get_symbols_from_config()
+    config['skip_indices'] = False  # Reset after use
     if not symbols:
-        logger.warning("No manual symbols configured, using default symbols")
+        logger.warning("No symbols discovered, using default symbols")
+        symbols = ['RELIANCE-EQ', 'TCS-EQ', 'HDFCBANK-EQ', 'INFY-EQ', 'ICICIBANK-EQ']
+    # Remove indices (NIFTY50, BANKNIFTY, etc.) from training symbols
+    indices = set(config.get('trading', {}).get('data', {}).get('indices', []))
+    symbols = [s for s in symbols if s not in indices]
+    if not symbols:
+        logger.warning("No symbols discovered, using default symbols")
         symbols = ['RELIANCE-EQ', 'TCS-EQ', 'HDFCBANK-EQ', 'INFY-EQ', 'ICICIBANK-EQ']
 
     # Prepare data collection

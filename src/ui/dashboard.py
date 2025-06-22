@@ -11,6 +11,9 @@ from datetime import datetime, timedelta
 import threading
 from collections import defaultdict
 import os
+from src.trading.paper_trading import PaperTradingEngine
+from src.trading.strategy import EnhancedTradingStrategy
+from src.autonomous_trader import AutonomousTrader
 
 # Configure logging to prevent duplicates
 logger = logging.getLogger(__name__)
@@ -139,6 +142,10 @@ class DashboardUI:
             'market_status': 'unknown'
         }
         
+        # Autonomous trading
+        self.autonomous_trader = None
+        self.autonomous_thread = None
+        
         logger.info("DashboardUI initialized")
     
     def _update_perf_metrics(self):
@@ -174,18 +181,64 @@ class DashboardUI:
         """Log a successful update"""
         self._perf_metrics['successful_updates'] += 1
     
-    def _fetch_and_display_live_prices(self, symbols: List[str]):
-        """Fetch and display live prices for symbols, fallback to last known price if needed"""
+    def _get_symbols(self):
+        """Get the list of symbols to monitor, respecting config and auto mode, and using model/ai_model if available."""
+        # Prefer ai_model or technical_analyzer if they have get_symbols
+        if hasattr(self.ai_model, 'get_symbols'):
+            try:
+                return self.ai_model.get_symbols(self.data_collector)
+            except Exception as e:
+                logger.error(f"Error getting symbols from ai_model: {e}")
+        if hasattr(self.technical_analyzer, 'get_symbols'):
+            try:
+                return self.technical_analyzer.get_symbols(self.data_collector)
+            except Exception as e:
+                logger.error(f"Error getting symbols from technical_analyzer: {e}")
+        # Fallback to data_collector
+        if self.data_collector and hasattr(self.data_collector, 'get_symbols_from_config'):
+            try:
+                return self.data_collector.get_symbols_from_config()
+            except Exception as e:
+                logger.error(f"Error getting symbols from data_collector: {e}")
+        # Fallback to config
+        trading_config = self.config.get('trading', {})
+        data_config = trading_config.get('data', {})
+        if data_config.get('mode') == 'manual':
+            return data_config.get('manual_symbols', [])
+        elif data_config.get('mode') == 'auto':
+            # If auto mode but collector not available, fallback to manual_symbols or default
+            return data_config.get('manual_symbols', ['RELIANCE.NS', 'TCS.NS', 'HDFCBANK.NS', 'INFY.NS', 'ICICIBANK.NS'])
+        return trading_config.get('symbols', ['RELIANCE.NS', 'TCS.NS', 'HDFCBANK.NS', 'INFY.NS', 'ICICIBANK.NS'])
+
+    def _fetch_and_display_live_prices(self, symbols: List[str] = None):
+        """Fetch and display live prices for symbols, always prefer WebSocket, fallback to REST API only if needed"""
         try:
             if not self.data_collector:
                 return
+            if symbols is None:
+                symbols = self._get_symbols()
             cols = st.columns(len(symbols))
             for i, symbol in enumerate(symbols):
                 with cols[i]:
-                    price_data = self.market_data_cache.get(symbol)
-                    last_update = self.market_data_cache.get_last_update(symbol)
+                    price_data = None
+                    last_update = None
+                    used_websocket = False
+                    # --- Always try WebSocket first ---
+                    websocket = getattr(self.data_collector, 'websocket', None)
+                    if websocket and hasattr(websocket, 'get_market_data'):
+                        ws_data = websocket.get_market_data(symbol)
+                        if ws_data and 'ltp' in ws_data:
+                            price_data = ws_data
+                            last_update = datetime.now()
+                            used_websocket = True
+                            self.market_data_cache.update(symbol, price_data)
+                    # --- Fallback: use cache, then REST API ---
                     if not price_data:
-                        # Fallback: get last known price from DataCollector
+                        # Try cache (could be from previous WebSocket or REST)
+                        price_data = self.market_data_cache.get(symbol)
+                        last_update = self.market_data_cache.get_last_update(symbol)
+                    if not price_data:
+                        # Fallback to REST API via DataCollector
                         price_data = self.data_collector.get_last_known_ltp(symbol)
                         if price_data:
                             self.market_data_cache.update(symbol, price_data)
@@ -205,40 +258,75 @@ class DashboardUI:
                         if last_update:
                             time_diff = datetime.now() - last_update
                             if time_diff.seconds < 60:
-                                st.caption(f"Updated {time_diff.seconds}s ago")
+                                st.caption(f"Updated {time_diff.seconds}s ago" + (" (WebSocket)" if used_websocket else " (REST API)"))
                             else:
-                                st.caption(f"Updated {time_diff.seconds // 60}m ago")
+                                st.caption(f"Updated {time_diff.seconds // 60}m ago" + (" (WebSocket)" if used_websocket else " (REST API)"))
+                        elif used_websocket:
+                            st.caption("Source: WebSocket")
+                        else:
+                            st.caption("Source: REST API (fallback)")
                     else:
                         st.metric("Price", "₹ --")
                         st.caption("Waiting for data...")
         except Exception as e:
             logger.error(f"Error displaying live prices: {str(e)}")
             st.error("Error updating prices. Check logs for details.")
-    
+
     def render_trading_tab(self):
-        """Render trading controls and positions"""
+        """Render trading controls and positions, with simulation as default and live switch button."""
         try:
             st.header("Trading Dashboard")
-            
-            # Display live prices first
-            trading_config = self.config.get('trading', {})
-            symbols = trading_config.get('symbols', ['RELIANCE.NS', 'TCS.NS', 'HDFCBANK.NS', 'INFY.NS', 'ICICIBANK.NS'])
-            self._fetch_and_display_live_prices(symbols)
-            
+            all_symbols = self._get_symbols()
+            # --- Searchable multi-select for all stocks ---
+            monitored_symbols = st.multiselect(
+                "Select stocks to monitor (star to add/remove)",
+                options=all_symbols,
+                default=st.session_state.get('monitored_symbols', []),
+                help="Search and select stocks to monitor live. All stocks are available for training."
+            )
+            st.session_state['monitored_symbols'] = monitored_symbols
+            if not monitored_symbols:
+                st.info("No stocks selected for monitoring. Use the search box above to add.")
+            else:
+                self._fetch_and_display_live_prices(monitored_symbols)
+
+            # Trading mode: simulation by default, switch to live with button
+            st.subheader("Trading Mode")
+            mode = st.session_state.get('trading_mode', 'simulation')
+            col1, col2 = st.columns([2, 1])
+            with col1:
+                st.info("Simulation mode is running by default. All trades are paper trades.")
+            with col2:
+                if st.button("Switch to LIVE Trading", key="switch_live"):
+                    st.session_state['trading_mode'] = 'live'
+                    mode = 'live'
+            if mode == 'simulation':
+                st.success("Paper Trading (Simulation) is ACTIVE.")
+                # Run simulation automatically
+                if hasattr(self, 'market_data_cache') and hasattr(self.market_data_cache, 'get_latest_data'):
+                    data = self.market_data_cache.get_latest_data(all_symbols)
+                else:
+                    data = None
+                if data is not None and not data.empty:
+                    self.run_simulation_mode(data)
+                else:
+                    st.warning("No market data available for simulation.")
+            else:
+                st.warning("LIVE Trading mode is enabled. Real trades will be placed if you proceed.")
+                # Here you would call your live trading logic
+
             # Trading controls
             col1, col2 = st.columns(2)
-            
             with col1:
                 st.subheader("Trading Controls")
                 is_active = st.toggle("Enable Trading", value=False)
-                
                 if is_active:
                     st.success("Trading active")
                 else:
                     st.warning("Trading paused")
-            
             with col2:
                 st.subheader("Risk Settings")
+                trading_config = self.config.get('trading', {})
                 max_position = st.number_input(
                     "Max Position Size",
                     min_value=0.0,
@@ -247,7 +335,35 @@ class DashboardUI:
                     step=0.01,
                     format="%.2f"
                 )
-            
+            # --- Fully Autonomous Mode Toggle ---
+            st.subheader("Autonomous AI Trading")
+            autonomous_mode = st.toggle(
+                "Enable Fully Autonomous Mode (AI + RL + News)",
+                value=st.session_state.get('autonomous_mode', False),
+                help="Let the AI make all trading decisions, including news sentiment via Gemini."
+            )
+            st.session_state['autonomous_mode'] = autonomous_mode
+            if autonomous_mode:
+                st.success("Fully Autonomous Trading is ENABLED. The AI will make and execute all trading decisions.")
+                # Start autonomous trader if not already running
+                if not self.autonomous_trader:
+                    self.autonomous_trader = AutonomousTrader(
+                        self.config,
+                        self.data_collector,
+                        self.trade_manager,
+                        self.technical_analyzer,
+                        self.ai_model
+                    )
+                if not self.autonomous_thread or not self.autonomous_thread.is_alive():
+                    self.autonomous_trader.set_autonomous_mode(True)
+                    self.autonomous_thread = threading.Thread(target=self.autonomous_trader.run, daemon=True)
+                    self.autonomous_thread.start()
+            else:
+                st.info("Manual or semi-automatic mode. You control trade execution.")
+                # Stop autonomous trader if running
+                if self.autonomous_trader:
+                    self.autonomous_trader.set_autonomous_mode(False)
+
             # Display positions if any
             if self.trade_manager:
                 positions = self.trade_manager.get_positions()
@@ -257,10 +373,9 @@ class DashboardUI:
                     st.dataframe(position_df, use_container_width=True)
                 else:
                     st.info("No open positions")
-                    
         except Exception as e:
-            logger.error(f"Error in trading tab: {e}")
-            st.error("Error updating trading view. Check logs for details.")
+            logger.error(f"Error in trading tab: {str(e)}")
+            st.error("Error in trading tab. Check logs for details.")
     
     def render_analysis_tab(self):
         """Render analysis tab with Technical Analysis"""
@@ -652,23 +767,33 @@ class DashboardUI:
                 for i, indicator in enumerate(selected_indicators):
                     with cols[i]:
                         st.subheader(indicator)
-                        if indicator == 'RSI':
-                            latest_rsi = analysis['momentum_indicators'].get('rsi', [])[-1]
-                            st.metric("RSI", f"{latest_rsi:.2f}")
-                        elif indicator == 'MACD':
-                            macd_data = analysis['trend_indicators'].get('macd', {})
-                            if macd_data:
-                                latest_macd = macd_data['macd'][-1]
-                                latest_signal = macd_data['signal'][-1]
-                                st.metric("MACD", f"{latest_macd:.2f}")
-                                st.metric("Signal", f"{latest_signal:.2f}")
-                        elif indicator == 'Bollinger Bands':
-                            bb_data = analysis['volatility_indicators'].get('bollinger_bands', {})
-                            if bb_data:
-                                st.metric("Upper", f"{bb_data['upper'][-1]:.2f}")
-                                st.metric("Middle", f"{bb_data['middle'][-1]:.2f}")
-                                st.metric("Lower", f"{bb_data['lower'][-1]:.2f}")
-                                
+                        try:
+                            if indicator == 'RSI':
+                                rsi_vals = analysis.get('momentum_indicators', {}).get('rsi', [])
+                                if rsi_vals and not pd.isnull(rsi_vals[-1]):
+                                    st.metric("RSI", f"{rsi_vals[-1]:.2f}")
+                                else:
+                                    st.warning("No valid RSI data.")
+                            elif indicator == 'MACD':
+                                macd_data = analysis.get('trend_indicators', {}).get('macd', {})
+                                if macd_data and 'macd' in macd_data and len(macd_data['macd']) > 0:
+                                    latest_macd = macd_data['macd'][-1]
+                                    latest_signal = macd_data['signal'][-1]
+                                    st.metric("MACD", f"{latest_macd:.2f}")
+                                    st.metric("Signal", f"{latest_signal:.2f}")
+                                else:
+                                    st.warning("No valid MACD data.")
+                            elif indicator == 'Bollinger Bands':
+                                bb_data = analysis.get('volatility_indicators', {}).get('bollinger_bands', {})
+                                if bb_data and all(isinstance(bb_data[k], (list, np.ndarray)) and len(bb_data[k]) > 0 for k in ['upper', 'middle', 'lower']):
+                                    st.metric("Upper", f"{bb_data['upper'][-1]:.2f}")
+                                    st.metric("Middle", f"{bb_data['middle'][-1]:.2f}")
+                                    st.metric("Lower", f"{bb_data['lower'][-1]:.2f}")
+                                else:
+                                    st.warning("No valid Bollinger Bands data.")
+                        except Exception as ind_e:
+                            logger.error(f"Error displaying {indicator} value: {ind_e}")
+                            st.warning(f"Error displaying {indicator} value.")
         except Exception as e:
             logger.error(f"Error displaying technical analysis: {str(e)}")
             st.error("Error displaying technical analysis. Check logs for details.")
@@ -685,41 +810,130 @@ class DashboardUI:
             st.sidebar.info("Market status unknown")
         # Add more sidebar controls as needed
 
+    def render_trade_notifications_top_right(self, trade_log: pd.DataFrame):
+        """Display persistent notification icon and rationale at the top right of all dashboard pages."""
+        # Inject custom CSS for top-right notification area
+        st.markdown(
+            """
+            <style>
+            .trade-notification-area {
+                position: fixed;
+                top: 1.5rem;
+                right: 2.5rem;
+                width: 370px;
+                z-index: 9999;
+                background: rgba(34, 34, 34, 0.98);
+                border-radius: 10px;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+                padding: 1rem 1.2rem 0.5rem 1.2rem;
+                color: #fff;
+                font-size: 1rem;
+                max-height: 60vh;
+                overflow-y: auto;
+            }
+            .trade-notification-area h5 {
+                margin-top: 0;
+                margin-bottom: 0.5rem;
+                font-size: 1.1rem;
+            }
+            .trade-notification-entry {
+                border-bottom: 1px solid #444;
+                margin-bottom: 0.5rem;
+                padding-bottom: 0.5rem;
+            }
+            .trade-notification-entry:last-child {
+                border-bottom: none;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True
+        )
+        notif_html = [
+            '<div class="trade-notification-area">',
+            '<h5>🔔 Trade Notifications</h5>'
+        ]
+        if trade_log is None or trade_log.empty:
+            notif_html.append('<div class="trade-notification-entry" style="text-align:center; color:#bbb;">No trades yet</div>')
+        else:
+            # Only show the last 5 trades for brevity
+            recent_trades = trade_log.tail(5)
+            for _, trade in recent_trades[::-1].iterrows():
+                notif_html.append('<div class="trade-notification-entry">')
+                notif_html.append(f"<b>{trade.get('action', '')}</b> | <b>{trade.get('symbol', '')}</b> @ ₹{trade.get('price', 0):,.2f}")
+                if 'stop_loss' in trade and pd.notnull(trade['stop_loss']):
+                    notif_html.append(f"<br><span style='color:#ff6666'>Stop Loss:</span> ₹{trade['stop_loss']:.2f}")
+                if 'target' in trade and pd.notnull(trade['target']):
+                    notif_html.append(f"<br><span style='color:#66ff66'>Target:</span> ₹{trade['target']:.2f}")
+                rationale = trade.get('rationale', {})
+                if isinstance(rationale, dict):
+                    if rationale.get('reason', ''):
+                        notif_html.append(f"<br><b>Reason:</b> {rationale.get('reason', '')}")
+                    if rationale.get('technical', ''):
+                        notif_html.append(f"<br><b>Technical:</b> {rationale.get('technical', '')}")
+                    if rationale.get('news', ''):
+                        notif_html.append(f"<br><b>Sentiment/News:</b> {rationale.get('news', '')}")
+                elif rationale:
+                    notif_html.append(f"<br><b>Rationale:</b> {rationale}")
+                if 'pnl' in trade:
+                    notif_html.append(f"<br><b>PnL:</b> ₹{trade['pnl']:.2f}")
+                notif_html.append('</div>')
+        notif_html.append('</div>')
+        st.markdown(''.join(notif_html), unsafe_allow_html=True)
+
     def render(self):
         """Main render method"""
         try:
             st.title("Dashboard")
-            
+
             # Performance metrics from last cycle
             if self._perf_metrics:
                 logger.debug(f"Last cycle performance: {self._perf_metrics}")
             self._perf_metrics.clear()
-            
+
             # Sidebar
             with st.sidebar:
                 st.header("Controls")
-            
+
+            # --- Persistent trade notifications at top right ---
+            # Try to get trade log from trade_manager or paper trading engine
+            trade_log = None
+            if self.trade_manager and hasattr(self.trade_manager, 'get_trade_log'):
+                trade_log = self.trade_manager.get_trade_log()
+            elif hasattr(self, 'last_sim_trade_log'):
+                trade_log = self.last_sim_trade_log
+            if trade_log is not None:
+                self.render_trade_notifications_top_right(trade_log)
+
             # Main content
             tab1, tab2, tab3 = st.tabs(["Trading", "Analysis", "Settings"])
-            
+
             with tab1:
                 self.render_trading_tab()
-            
+
             with tab2:
                 self.render_analysis_tab()
-            
+
             with tab3:
                 self.render_settings_tab()
             logger.info("Dashboard render cycle complete")
-            
+
         except Exception as e:
             logger.error(f"Error in dashboard render cycle: {e}")
             st.error("An error occurred while rendering the dashboard")
 
     def run(self):
-        """Main entry point for running the dashboard"""
-        try:
-            self.render()
-        except Exception as e:
-            logger.error(f"Error running dashboard: {e}")
-            st.error(f"An error occurred while running the dashboard: {str(e)}")
+        """Entry point for running the dashboard UI (for compatibility with main.py)."""
+        self.render()
+
+    def run_simulation_mode(self, data: pd.DataFrame):
+        """Run paper trading simulation from the dashboard UI."""
+        strategy = EnhancedTradingStrategy(self.config)
+        engine = strategy.run_paper_trading(data, ai_model=self.ai_model)
+        st.subheader("Paper Trading Results")
+        st.write(f"Final Balance: ₹{engine.get_balance():,.2f}")
+        st.write("Trade Log:")
+        trade_log = engine.get_trade_log()
+        # Store for persistent notification rendering
+        self.last_sim_trade_log = trade_log
+        st.dataframe(trade_log)
+        st.line_chart(engine.get_equity_curve())

@@ -37,29 +37,43 @@ class Backtester:
             
             # Run through each day
             for date in df.index:
-                daily_data = df.loc[:date]  # Use data up to current date
-                
-                # Get trading signals
-                signals = self.strategy.generate_signals(daily_data)
-                
-                # Execute trades based on signals
-                self._execute_trades(signals.iloc[-1], df.loc[date])
-                
-                # Track performance
-                current_value = self._calculate_portfolio_value(df.loc[date])
-                equity_curve.append(current_value)
-                
-                # Calculate daily return
-                daily_return = (current_value / equity_curve[-2] - 1) if len(equity_curve) > 1 else 0
-                daily_returns.append(daily_return)
-                
-                # Update max drawdown
-                peak_value = max(peak_value, current_value)
-                drawdown = (peak_value - current_value) / peak_value
-                max_drawdown = max(max_drawdown, drawdown)
+                try:
+                    daily_data = df.loc[:date]  # Use data up to current date
+                    
+                    # Get trading signals
+                    signals = self.strategy.generate_signals(daily_data)
+                    
+                    # Determine the symbol for this row
+                    symbol = df.loc[date]['symbol'] if 'symbol' in df.columns else None
+                    if symbol:
+                        # Map the correct final signal column to 'signal'
+                        final_col = f'{symbol}_final'
+                        if final_col in signals.columns:
+                            signals['signal'] = signals[final_col]
+                        else:
+                            logger.warning(f"No final signal column found for symbol {symbol}, defaulting to 0.")
+                            signals['signal'] = 0
+                    
+                    # Execute trades based on signals
+                    self._execute_trades(signals.iloc[-1], df.loc[date])
+                    
+                    # Track performance
+                    current_value = self._calculate_portfolio_value(df.loc[date])
+                    equity_curve.append(current_value)
+                    
+                    # Calculate daily return
+                    daily_return = (current_value / equity_curve[-2] - 1) if len(equity_curve) > 1 else 0
+                    daily_returns.append(daily_return)
+                    
+                    # Update max drawdown
+                    peak_value = max(peak_value, current_value)
+                    drawdown = (peak_value - current_value) / peak_value
+                    max_drawdown = max(max_drawdown, drawdown)
+                except Exception as e:
+                    logger.error(f"Error in backtest loop: {str(e)}")
             
             # Calculate performance metrics
-            total_return = (equity_curve[-1] / self.initial_capital - 1) * 100
+            total_return = (equity_curve[-1] / self.initial_capital - 1) * 100 if equity_curve else 0
             sharpe_ratio = self._calculate_sharpe_ratio(daily_returns)
             win_rate = self._calculate_win_rate()
             
@@ -76,6 +90,20 @@ class Backtester:
             }
             
             logger.info(f"Backtest completed. Total return: {total_return:.2f}%, Sharpe ratio: {sharpe_ratio:.2f}")
+            
+            # Log signal distribution before trade execution
+            if 'signal' in df.columns:
+                logger.info(f"Signal value counts before trade execution: {df['signal'].value_counts().to_dict()}")
+            else:
+                logger.warning("No 'signal' column found before trade execution!")
+            
+            # After trade execution, log number of trades
+            logger.info(f"Total trades executed: {len(self.trades)}")
+            if len(self.trades) == 0:
+                logger.warning("No trades executed in backtest. Check signal generation and thresholds.")
+            else:
+                logger.info(f"Sample trades: {self.trades[:3]}")
+            
             return results
             
         except Exception as e:
@@ -114,7 +142,7 @@ class Backtester:
             # Check for new entry signals
             if signal['signal'] != 0 and symbol not in self.positions:
                 # Calculate position size
-                risk_amount = self.current_capital * self.strategy.config['risk']['position_size']
+                risk_amount = self.current_capital * self.strategy.risk_config['position_size']
                 stop_loss = self.strategy.calculate_stop_loss(current_data)
                 quantity = self._calculate_position_size(
                     risk_amount, current_data['close'], stop_loss
@@ -141,7 +169,7 @@ class Backtester:
             return True
             
         # Check take profit
-        take_profit = position['entry_price'] * (1 + self.strategy.config['profit_target'])
+        take_profit = position['entry_price'] * (1 + self.strategy.profit_target)
         if current_price >= take_profit:
             return True
             

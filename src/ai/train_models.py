@@ -38,14 +38,15 @@ class ModelTrainer:
             raise
 
     def collect_training_data(self) -> pd.DataFrame:
-        """Collect and prepare training data"""
+        """Collect and prepare training data, skipping indices like NIFTY50/BANKNIFTY"""
         try:
-            # Get configured symbols
-            symbols = self.config.get('trading', {}).get('data', {}).get('manual_symbols', [])
+            # Set skip_indices flag for DataCollector
+            self.data_collector.config['skip_indices'] = True
+            symbols = self.data_collector.get_symbols_from_config()
+            self.data_collector.config['skip_indices'] = False  # Reset after use
             if not symbols:
-                logger.warning("No symbols configured, using defaults")
+                logger.warning("No symbols discovered, using defaults")
                 symbols = ['RELIANCE.NS', 'TCS.NS', 'INFY.NS']
-            
             logger.info(f"Collecting data for symbols: {symbols}")
             
             # Collect historical data
@@ -71,6 +72,9 @@ class ModelTrainer:
                         # Store analysis results
                         df['trend_strength'] = self.strategy._calculate_trend_strength(df)
                         df['breakout_strength'] = self.strategy._calculate_breakout_strength(df)
+                        
+                        # Add sentiment integration (robust, always present)
+                        df = self.ai_trader.add_sentiment_to_market_data(symbol, df)
                         
                         all_data.append(df)
                         logger.info(f"Collected and processed {len(df)} records for {symbol}")
@@ -111,7 +115,11 @@ class ModelTrainer:
             logger.info("Training Technical Analysis Model...")
             X_train, y_train = self.tech_model.prepare_data(train_data)
             X_val, y_val = self.tech_model.prepare_data(val_data)
-            
+            # --- FIX: Always match model type to data shape ---
+            if len(X_train.shape) == 3:
+                self.tech_model.build_model(X_train.shape[1:], model_type='lstm')
+            else:
+                self.tech_model.build_model(X_train.shape[1], model_type='dense')
             history = self.tech_model.train_model(
                 X_train, y_train,
                 validation_data=(X_val, y_val),
@@ -134,8 +142,21 @@ class ModelTrainer:
             
             # Train AI Trader
             logger.info("Training AI Trader Model...")
-            self.ai_trader.train(train_data)
-            
+            X_ai, y_ai = self.ai_trader.prepare_features(train_data)
+            if X_ai is None or y_ai is None or len(X_ai) == 0 or len(y_ai) == 0:
+                logger.error("AI Trader features or labels are empty. Skipping AI Trader training.")
+                metrics['ai_trader_status'] = 'skipped'
+            else:
+                ai_train_result = self.ai_trader.train(X_ai, y_ai)
+                if isinstance(ai_train_result, dict) and ai_train_result.get("status") == "error":
+                    logger.error(f"AI Trader training failed: {ai_train_result.get('reason')}")
+                    metrics['ai_trader_status'] = 'error'
+                elif isinstance(ai_train_result, dict) and ai_train_result.get("status") == "skipped":
+                    logger.warning(f"AI Trader training skipped: {ai_train_result.get('reason')}")
+                    metrics['ai_trader_status'] = 'skipped'
+                else:
+                    metrics['ai_trader_status'] = 'success'
+
             # Backtest strategy
             logger.info("Running backtest...")
             backtest_results = self.backtester.run(test_data)
@@ -151,7 +172,26 @@ class ModelTrainer:
             
             # Save models
             self.save_models()
-            
+
+            # --- Robo trading readiness check ---
+            min_acc = self.config.get('model', {}).get('min_accuracy', 0.7)
+            min_f1 = self.config.get('model', {}).get('min_f1', 0.7)
+            min_win = self.config.get('model', {}).get('min_win_rate', 0.55)
+            ready = True
+            if metrics['tech_model_accuracy'] < min_acc:
+                logger.warning(f"Model accuracy {metrics['tech_model_accuracy']:.2f} below threshold {min_acc}")
+                ready = False
+            if metrics['tech_model_f1'] < min_f1:
+                logger.warning(f"Model F1 {metrics['tech_model_f1']:.2f} below threshold {min_f1}")
+                ready = False
+            if metrics['backtest_win_rate'] < min_win:
+                logger.warning(f"Backtest win rate {metrics['backtest_win_rate']:.2f} below threshold {min_win}")
+                ready = False
+            if ready:
+                logger.info("MODEL IS READY FOR ROBO TRADING: All metrics above thresholds.")
+            else:
+                logger.error("MODEL IS NOT READY FOR ROBO TRADING: One or more metrics below threshold. Live trading will be blocked.")
+            metrics['robo_trading_ready'] = ready
             return metrics
             
         except Exception as e:
@@ -178,20 +218,17 @@ class ModelTrainer:
     def load_models(self):
         """Load saved models"""
         try:
+            import tensorflow as tf  # Fix for tf not defined
             models_dir = 'models'
-            
             # Load Technical Analysis Model
             self.tech_model.model = tf.keras.models.load_model(
                 os.path.join(models_dir, 'technical_model.h5')
             )
-            
             # Load AI Trader Model
             self.ai_trader.model = tf.keras.models.load_model(
                 os.path.join(models_dir, 'ai_trader_model.h5')
             )
-            
             logger.info("Models loaded successfully")
-            
         except Exception as e:
             logger.error(f"Error loading models: {str(e)}")
             raise
@@ -225,6 +262,13 @@ def main():
         
         logger.info("Training completed successfully")
         logger.info(f"Final Metrics: {metrics}")
+        
+        # After training and backtest, check metrics and trades
+        logger.info(f"Backtest metrics: accuracy={metrics['accuracy']:.4f}, F1={metrics['f1']:.4f}, win_rate={metrics['win_rate']:.4f}, trades={metrics['num_trades']}")
+        if metrics['accuracy'] < 0.7 or metrics['f1'] < 0.7 or metrics['win_rate'] < 0.55 or metrics['num_trades'] == 0:
+            logger.error("Pipeline not ready for AI trading: metrics or trades below threshold.")
+        else:
+            logger.info("Pipeline is READY FOR AI TRADING!")
         
     except Exception as e:
         logger.error(f"Training pipeline failed: {str(e)}")

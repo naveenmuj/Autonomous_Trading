@@ -216,10 +216,12 @@ class TrainingPipeline:
             from data.collector import DataCollector
             collector = DataCollector(self.config)
             
-            # Get configured symbols
-            symbols = self.config.get('trading', {}).get('data', {}).get('manual_symbols', [])
+            # Set skip_indices flag for DataCollector
+            self.config['skip_indices'] = True
+            symbols = collector.get_symbols_from_config()
+            self.config['skip_indices'] = False  # Reset after use
             if not symbols:
-                logger.warning("No symbols configured for training")
+                logger.warning("No symbols discovered for training")
                 symbols = ['RELIANCE-EQ', 'TCS-EQ', 'HDFCBANK-EQ']  # Default symbols
             
             # Fetch historical data

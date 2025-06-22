@@ -2,11 +2,21 @@
 apis:
   newsapi:
     api_key: "dc5b0c4b4bae4709b4a0f28f80c32dee"
+  finnhub:
+    api_key: "d0qoce9r01qg1llav1a0d0qoce9r01qg1llav1ag"
   angel_one:
     api_key: "N46Ju7kE"
     client_id: "AAAM842306"
     mpin: "9742"
     totp_secret: "VFEYK4LXWYDIEMTYLRG7LFK2SA"
+
+notifications:
+  smtp:
+    server: smtp.example.com
+    port: 587
+    user: your@email.com
+    password: yourpassword
+    to: recipient@email.com
 
 # Trading Configuration
 trading:
@@ -15,30 +25,30 @@ trading:
   max_positions: 5
   risk_percentage: 2 # Maximum risk per trade as percentage of portfolio
   default_quantity: 1
+  risk:
+    position_size: 0.02 # 2% of capital per trade
+    stop_loss: 0.02 # 2% stop loss
+    risk_per_trade: 0.01 # 1% risk per trade
   # Data collection and trading configuration
   data:
-    mode: "manual" # Can be "manual" or "auto"    # Manual mode settings - specific stocks to trade
+    mode: "auto" # Can be "manual" or "auto"
     manual_symbols:
-    - "RELIANCE.NS" # Reliance Industries
-    - "TCS.NS" # Tata Consultancy Services
-    - "HDFCBANK.NS" # HDFC Bank
-    - "INFY.NS" # Infosys
-    - "ICICIBANK.NS" # ICICI Bank
-    # Auto mode settings    auto:
-    market_caps: [ "large", "mid", "small" ] # Include all market caps
-    min_volume: 100000 # Minimum daily trading volume
-    sectors:
-    # Leave empty for all sectors
-    - "NIFTY50"
-    - "NIFTY100"
+    - "RELIANCE.NS"
+    - "TCS.NS"
+    - "HDFCBANK.NS"
+    - "INFY.NS"
+    - "ICICIBANK.NS"
+    auto:
+      market_caps: [ "large", "mid", "small" ] # Include all market caps
+      min_volume: 100000 # Minimum daily trading volume
+      sectors: [] # Leave empty for all sectors, or specify e.g. ["IT", "BANKS"]
     exclude_symbols: [] # Symbols to exclude in auto mode
-
     # Always include these indices regardless of mode
-    indices:
-    - "NIFTY50" # NIFTY 50 Index
-    - "BANKNIFTY" # Bank NIFTY Index
+    # indices:
+    #   - "NIFTY50" # NIFTY 50 Index
+    #   - "BANKNIFTY" # Bank NIFTY Index
 
-  # Strategy Configuration
+    # Strategy Configuration
   strategy:
     confidence_levels:
       strong_buy: 0.7
@@ -59,93 +69,93 @@ trading:
         period: 20
         std_dev: 2
 
-      # Technical indicator parameters only
-      model_indicators:
+    # Technical indicator parameters only
+    model_indicators:
 
-        features:
-          technical_indicators:
-            price_action: true
-            trend_indicators:
-              sma: [ 10, 20, 50, 200 ]
-              ema: [ 9, 21 ]
-              macd:
-                fast: 12
-                slow: 26
-                signal: 9
-            momentum_indicators:
-              rsi:
-                period: 14
-                overbought: 70
-                oversold: 30
-              stochastic:
-                k_period: 14
-                d_period: 3
-              adx:
-                period: 14
-            volatility_indicators:
-              bollinger_bands:
-                period: 20
-                std_dev: 2
-              atr:
-                period: 14
-            volume_indicators:
-              obv: true
-              volume_sma: 20
-            support_resistance:
-              pivot_points: true
-              fibonacci: true
-            pattern_recognition:
-              candlestick_patterns: true
-              chart_patterns: true
+      features:
+        technical_indicators:
+          price_action: true
+          trend_indicators:
+            sma: [ 10, 20, 50, 200 ]
+            ema: [ 9, 21 ]
+            macd:
+              fast: 12
+              slow: 26
+              signal: 9
+          momentum_indicators:
+            rsi:
+              period: 14
+              overbought: 70
+              oversold: 30
+            stochastic:
+              k_period: 14
+              d_period: 3
+            adx:
+              period: 14
+          volatility_indicators:
+            bollinger_bands:
+              period: 20
+              std_dev: 2
+            atr:
+              period: 14
+          volume_indicators:
+            obv: true
+            volume_sma: 20
+          support_resistance:
+            pivot_points: true
+            fibonacci: true
+          pattern_recognition:
+            candlestick_patterns: true
+            chart_patterns: true
 
-        market_context:
-          market_regime: true
-          sector_performance: true
-          market_breadth: true
-          vix: true
+      market_context:
+        market_regime: true
+        sector_performance: true
+        market_breadth: true
+        vix: true
 
-        sentiment_analysis:
-          enabled: true
-          sources: [ "news", "social_media" ]
+      sentiment_analysis:
+        enabled: true
+        sources: [ "news", "social_media" ]
 
-        derivatives:
-          option_chain: true
-          open_interest: true
-          put_call_ratio: true
+      derivatives:
+        option_chain: true
+        open_interest: true
+        put_call_ratio: true
 
-        institutional_data:
-          fii_dii_flow: true
-          delivery_positions: true
+      institutional_data:
+        fii_dii_flow: true
+        delivery_positions: true
 
-      training:
-        epochs: 200
-        batch_size: 64
-        validation_split: 0.2
-        early_stopping:
-          patience: 10
-          min_delta: 0.001
-        optimizer:
-          type: "adam"
-          learning_rate: 0.001
-          beta_1: 0.9
-          beta_2: 0.999
-        regularization:
-          dropout: 0.2
-          l2: 0.01
-        hyperparameter_tuning:
-          enabled: true
-          trials: 50
-          max_epochs: 300
+    training:
+      epochs: 200
+      batch_size: 64
+      validation_split: 0.2
+      early_stopping:
+        patience: 10
+        min_delta: 0.001
+      optimizer:
+        type: "adam"
+        learning_rate: 0.001
+        beta_1: 0.9
+        beta_2: 0.999
+      regularization:
+        dropout: 0.2
+        l2: 0.01
+      hyperparameter_tuning:
+        enabled: true
+        trials: 50
+        max_epochs: 300
 
-    # Trading rules
-    rules:
-      min_confidence: 0.6
-      profit_target: 0.03 # 3%
-      stop_loss: 0.02 # 2% 
-      trailing_stop: true
+  # Trading rules
+  rules:
+    min_confidence: 0.6
+    profit_target: 0.03 # 3%
+    stop_loss: 0.02 # 2% 
+    trailing_stop: true
 
   symbols:
-    mode: "manual" # Can be "auto" or "manual"
+    mode: "auto" # Can be "auto" or "manual"
     # If mode is auto, will fetch top N stocks by market cap
     top_n_stocks: 50
     # If mode is manual, will use this list
@@ -160,7 +170,8 @@ data:
   - MACD
   - BB
   - SMA
-  - EMA  websocket:
+  - EMA
+  websocket:
     retry:
       max_attempts: 3
       initial_delay: 3 # seconds

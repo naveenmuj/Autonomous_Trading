@@ -30,6 +30,14 @@ from ai.training_pipeline import TrainingPipeline
 from trading.strategy import EnhancedTradingStrategy
 from ui.dashboard import DashboardUI
 from ai.models import AITrader, TechnicalAnalysisModel, SentimentAnalyzer
+from tensorflow.keras.models import load_model
+import torch
+from apscheduler.schedulers.background import BackgroundScheduler
+import subprocess
+import csv
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 # Remove any existing handlers from the root logger
 for handler in logging.root.handlers[:]:
@@ -177,10 +185,70 @@ def load_config():
         raise
 
 @st.cache_resource
+def load_pretrained_models(config):
+    """Load pre-trained models for live trading. Retrain separately and reload as needed."""
+    models = {}
+    # LSTM Technical Analysis Model
+    try:
+        lstm_path = os.path.join(project_root, 'models', 'ta_lstm_model.h5')
+        if os.path.exists(lstm_path):
+            models['ta_lstm'] = load_model(lstm_path)
+            logger.info(f"Loaded LSTM model from {lstm_path}")
+        else:
+            logger.warning(f"LSTM model not found at {lstm_path}")
+    except Exception as e:
+        logger.error(f"Failed to load LSTM model: {e}")
+    # RL Model (Stable Baselines3 PPO)
+    try:
+        rl_path = os.path.join(project_root, 'models', 'trading_model_rl.zip')
+        if os.path.exists(rl_path):
+            from stable_baselines3 import PPO
+            models['ppo'] = PPO.load(rl_path)
+            logger.info(f"Loaded RL model from {rl_path}")
+        else:
+            logger.warning(f"RL model not found at {rl_path}")
+    except Exception as e:
+        logger.error(f"Failed to load RL model: {e}")
+    # Transformer Model (PyTorch)
+    try:
+        transformer_path = os.path.join(project_root, 'models', 'transformer_model_best.pt')
+        input_dim = None
+        # Try to get input_dim from config or a metadata file
+        try:
+            input_dim = config.get('model', {}).get('transformer', {}).get('input_dim')
+        except Exception:
+            input_dim = None
+        if input_dim is None:
+            # Try to read from a metadata file if available
+            meta_path = os.path.join(project_root, 'models', 'transformer_model_meta.yaml')
+            if os.path.exists(meta_path):
+                import yaml
+                with open(meta_path, 'r') as f:
+                    meta = yaml.safe_load(f)
+                    input_dim = meta.get('input_dim', 20)
+            else:
+                input_dim = 20  # Fallback to 20 (matches training)
+        if os.path.exists(transformer_path):
+            from ai.train import TimeSeriesTransformer
+            model = TimeSeriesTransformer(input_dim=input_dim, output_dim=2, d_model=128, nhead=8, num_layers=3, dropout=0.2)
+            state_dict = torch.load(transformer_path, map_location=torch.device('cpu'))
+            try:
+                model.load_state_dict(state_dict)
+                model.eval()
+                models['transformer'] = model
+                logger.info(f"Loaded Transformer model from {transformer_path} with input_dim={input_dim}")
+            except RuntimeError as e:
+                logger.error(f"Transformer model state_dict loading failed: {e}\nCheck that input_dim used for inference matches training (expected {input_dim}).")
+        else:
+            logger.warning(f"Transformer model not found at {transformer_path}")
+    except Exception as e:
+        logger.error(f"Failed to load Transformer model: {e}")
+    return models
+
+@st.cache_resource
 def initialize_components(config):
-    """Initialize all system components"""
+    """Initialize all system components, loading pre-trained models only."""
     logger.info("Initializing system components...")
-    
     try:
         # Initialize DataCollector
         collector = DataCollector(config)
@@ -188,9 +256,15 @@ def initialize_components(config):
         # Initialize Trade Manager
         trade_manager = TradeManager(config, collector)
         
-        # Initialize Models
+        # Initialize Models (load pre-trained only)
         technical_analyzer = TechnicalAnalysisModel(config)
         ai_model = AITrader(config)
+        pretrained_models = load_pretrained_models(config)
+        # Optionally, pass loaded models to AITrader/TechnicalAnalysisModel if needed
+        if hasattr(ai_model, 'set_loaded_models'):
+            ai_model.set_loaded_models(pretrained_models)
+        if hasattr(technical_analyzer, 'set_loaded_models'):
+            technical_analyzer.set_loaded_models(pretrained_models)
         
         # Initialize Dashboard
         dashboard = DashboardUI(
@@ -238,9 +312,97 @@ def initialize_system():
         logger.error(f"Error initializing system: {e}")
         raise
 
+def send_retrain_notification(subject, body):
+    # Read SMTP config from config.yaml
+    try:
+        with open(os.path.join(project_root, 'config.yaml'), 'r') as f:
+            config = yaml.safe_load(f)
+        smtp_config = config.get('notifications', {}).get('smtp', {})
+        SMTP_SERVER = smtp_config.get('server', 'smtp.example.com')
+        SMTP_PORT = int(smtp_config.get('port', 587))
+        SMTP_USER = smtp_config.get('user', 'your@email.com')
+        SMTP_PASS = smtp_config.get('password', 'yourpassword')
+        TO_EMAIL = smtp_config.get('to', 'your@email.com')
+        FROM_EMAIL = SMTP_USER
+    except Exception as e:
+        logger.error(f"Failed to load SMTP config from config.yaml: {e}")
+        return
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = FROM_EMAIL
+        msg['To'] = TO_EMAIL
+        msg['Subject'] = subject
+        msg.attach(MIMEText(body, 'plain'))
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.sendmail(FROM_EMAIL, TO_EMAIL, msg.as_string())
+        logger.info(f"Retrain notification sent to {TO_EMAIL}")
+    except Exception as e:
+        logger.error(f"Failed to send retrain notification: {e}")
+
+def retrain_model_job():
+    logger.info("Scheduled retraining started...")
+    csv_path = os.path.join(project_root, 'logs', 'retrain_history.csv')
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    try:
+        # Run your training script as a subprocess
+        result = subprocess.run(
+            [sys.executable, os.path.join(project_root, "src", "ai", "train.py")],
+            capture_output=True, text=True
+        )
+        success = result.returncode == 0
+        log_row = {
+            'timestamp': now,
+            'status': 'success' if success else 'error',
+            'stdout': result.stdout.strip()[:500],
+            'stderr': result.stderr.strip()[:500]
+        }
+        # Write/append to CSV
+        file_exists = os.path.isfile(csv_path)
+        with open(csv_path, 'a', newline='', encoding='utf-8') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=['timestamp', 'status', 'stdout', 'stderr'])
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(log_row)
+        if success:
+            logger.info("Retraining completed successfully.")
+            send_retrain_notification(
+                subject="Model Retraining Success",
+                body=f"Retraining completed successfully at {now}.\n\nOutput:\n{result.stdout.strip()[:500]}"
+            )
+        else:
+            logger.error(f"Retraining failed: {result.stderr}")
+            send_retrain_notification(
+                subject="Model Retraining FAILED",
+                body=f"Retraining failed at {now}.\n\nError:\n{result.stderr.strip()[:500]}"
+            )
+            raise RuntimeError(f"Retraining failed: {result.stderr}")
+    except Exception as e:
+        logger.error(f"Retraining job error: {e}")
+        # Log error to CSV as well
+        with open(csv_path, 'a', newline='', encoding='utf-8') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=['timestamp', 'status', 'stdout', 'stderr'])
+            if os.path.getsize(csv_path) == 0:
+                writer.writeheader()
+            writer.writerow({
+                'timestamp': now,
+                'status': 'error',
+                'stdout': '',
+                'stderr': str(e)
+            })
+        send_retrain_notification(
+            subject="Model Retraining ERROR",
+            body=f"Retraining job error at {now}.\n\nException:\n{str(e)}"
+        )
+        raise
+
 def main():
     logger.info("Starting application...")
-    
+    scheduler = BackgroundScheduler()
+    # Schedule retraining every day at 2am
+    scheduler.add_job(retrain_model_job, 'cron', hour=2, minute=0)
+    scheduler.start()
     try:
         # Create title and initialization message
         st.title("")
@@ -289,3 +451,6 @@ if __name__ == "__main__":
     os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
     warnings.filterwarnings("ignore")
     main()
+
+# NOTE: Model training is NOT performed at startup. Run ai/train.py or ai/training_pipeline.py separately to retrain models.
+# Reload models by restarting the app or by implementing a reload mechanism if needed.
