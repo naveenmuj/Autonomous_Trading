@@ -12,10 +12,13 @@ class NewsSentimentAnalyzer:
         self.endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent"
 
     def _get_gemini_api_key(self) -> Optional[str]:
-        # Look for Gemini API key in config
-        return self.config.get('gemini_api_key') or \
-               self.config.get('api', {}).get('gemini_api_key') or \
-               self.config.get('llm', {}).get('gemini_api_key')
+        # Look for Gemini API key in config (support nested under 'apis')
+        return (
+            self.config.get('gemini_api_key') or
+            self.config.get('api', {}).get('gemini_api_key') or
+            self.config.get('llm', {}).get('gemini_api_key') or
+            self.config.get('apis', {}).get('gemini', {}).get('api_key')
+        )
 
     def analyze_news(self, headlines: List[str], context: str = "") -> Dict[str, Any]:
         """Analyze news headlines for sentiment and trading signal using Gemini."""
@@ -55,7 +58,7 @@ class NewsSentimentAnalyzer:
         prompt += "\nRespond in the format: Sentiment: <bullish|bearish|neutral>, Score: <number>, Action: <buy|sell|hold>, Reason: <short explanation>."
         return prompt
 
-    def _parse_gemini_response(self, text: str) -> (str, float):
+    def _parse_gemini_response(self, text: str) -> tuple[str, float]:
         import re
         sentiment = "neutral"
         score = 0.0

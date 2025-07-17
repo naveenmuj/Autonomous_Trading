@@ -56,23 +56,22 @@ class TradeManager:
             self.account_value = self.config.get('initial_account_value', 100000)
 
     def _get_angel_portfolio_balance(self) -> float:
-        """Get portfolio balance from Angel One API in live mode"""
+        """Get portfolio balance from Angel One API in live mode using robust DataCollector method."""
         try:
-            if not self.data_collector or not hasattr(self.data_collector, 'angel_api'):
-                logger.warning("Angel One API not initialized")
+            if not self.data_collector or not hasattr(self.data_collector, 'get_broker_balance'):
+                logger.warning("Angel One DataCollector.get_broker_balance not available")
                 return 0.0
-
-            response = self.data_collector.angel_api.portfolio()
-            if response and response.get('status') and response.get('data'):
-                portfolio_data = response['data']
-                # Get available balance + stocks value
-                available_balance = float(portfolio_data.get('availablecash', 0))
-                stocks_value = float(portfolio_data.get('net', 0))  # Net portfolio value
-                return available_balance + stocks_value
+            logger.info("Fetching broker balance using DataCollector.get_broker_balance()")
+            balance = self.data_collector.get_broker_balance()
+            logger.info(f"Fetched broker balance: {balance}")
+            if balance:
+                available_cash = float(balance.get('available_cash') or 0)
+                net = float(balance.get('net') or 0)
+                logger.info(f"Available Cash: {available_cash}, Net: {net}")
+                return net
             else:
-                logger.error(f"Failed to get portfolio data: {response}")
+                logger.error("No balance data returned from Angel One RMS endpoint.")
                 return 0.0
-
         except Exception as e:
             logger.error(f"Error getting Angel One portfolio balance: {str(e)}")
             return 0.0

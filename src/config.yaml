@@ -1,3 +1,44 @@
+api_rate_limit_wait: 2
+automation:
+  retraining:
+    enabled: true
+    frequency: "daily"
+    last_trained: null
+  data_ingestion:
+    enabled: true
+    schedule: "hourly"
+  model_evaluation:
+    enabled: true
+    performance_threshold: 0.6
+  error_notification:
+    enabled: true
+    method: "email"
+    recipients:
+    - "your@email.com"
+  hyperparameter_tuning:
+    enabled: true
+    method: "optuna"
+  feature_engineering:
+    enabled: true
+    llm_suggest: true
+  journaling:
+    enabled: true
+    auto_review: true
+  api_key_rotation:
+    enabled: true
+    alert_days_before_expiry: 5
+  deployment:
+    enabled: true
+    auto_promote_best: true
+  documentation:
+    enabled: true
+    auto_update: true
+
+gemini:
+  api_url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent"
+  api_key: "AIzaSyCeOZV5u9z7lUFPpJAx9bTuQ8b9cN52tOs"
+  enable_training: true
+
 api: &id001
   angel_one:
     api_key: N46Ju7kE
@@ -8,7 +49,6 @@ api: &id001
     api_key: d0qoce9r01qg1llav1a0d0qoce9r01qg1llav1ag
   newsapi:
     api_key: dc5b0c4b4bae4709b4a0f28f80c32dee
-apis: *id001
 data:
   fallback_stocks:
   - RELIANCE.NS
@@ -1024,7 +1064,6 @@ trading:
   - JCHAC-EQ.NS
   - MPHASIS-EQ.NS
   - OSWALGREEN-EQ.NS
-  - INDSWFTLAB-EQ.NS
   - GRINFRA-EQ.NS
   - CIGNITITEC-EQ.NS
   - ETERNAL-EQ.NS
@@ -1746,7 +1785,7 @@ trading:
   - IRFC-EQ.NS
   - CGCL-EQ.NS
   - INDIGOPNTS-EQ.NS
-  - JINDWORLD-EQ.NS
+  - JINDALWORLD-EQ.NS
   - SURAJEST-EQ.NS
   - MUTHOOTMF-EQ.NS
   - MUFTI-EQ.NS
@@ -2369,4 +2408,4 @@ trading:
   - PARADEEP-EQ.NS
   - NEXTMEDIA-EQ.NS
   - AXITA-EQ.NS
-  take_profit: 5.0
+  - take_profit: 5.0

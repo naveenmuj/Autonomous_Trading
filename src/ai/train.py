@@ -1,20 +1,22 @@
-import os
-import sys
 import yaml
 import pandas as pd
 from datetime import datetime, timedelta
-from data.collector import DataCollector
-from ai.models import TradingEnvironment, TechnicalAnalysisModel
+from src.data.collector import DataCollector
+from src.ai.models import TradingEnvironment, TechnicalAnalysisModel
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 import numpy as np
 import logging
-from ai.meta import optimize_strategy, detect_market_regime
+from src.ai.meta import optimize_strategy, detect_market_regime
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import math
 import tensorflow as tf  # Added import for TensorFlow
+import os
+import sys
+import time
+from src.data.news_sentiment import fetch_sentiment_news
 
 class TimeSeriesTransformer(nn.Module):
     def __init__(self, input_dim, d_model=64, nhead=4, num_layers=2, output_dim=2, dropout=0.1):
@@ -126,23 +128,54 @@ def train_model(config_path='config.yaml'):
     # Select only numerical features for training
     numerical_features = ['open', 'high', 'low', 'close', 'volume', 'SMA_20', 'Daily_Return']
 
+    missing_token_symbols = []
     for symbol in symbols:
         logger.info(f"Collecting data for {symbol}...")
-        # Convert symbol format from SYMBOL-EQ to SYMBOL
-        base_symbol = symbol.replace('-EQ', '')
+        # Use symbol as-is for token lookup
+        days = (end_date - start_date).days
         data = collector.get_historical_data(
-            symbol=base_symbol,
-            start_date=start_date,
-            end_date=end_date,
-            interval='1d'
+            symbol=symbol,
+            interval='1d',
+            days=days
         )
+        time.sleep(1)  # Add delay to avoid API rate limit
         if data is not None and not data.empty:
+            # Compute SMA_20 and Daily_Return
+            data = data.sort_values('timestamp')
+            data['SMA_20'] = data['close'].rolling(window=20, min_periods=1).mean()
+            data['Daily_Return'] = data['close'].pct_change().fillna(0)
+            # Fetch news for the last 90 days using robust tested function
+            news_start = end_date - timedelta(days=90)
+            news_items = fetch_sentiment_news(symbol, config)
+            # Aggregate daily sentiment (simple count, or use your scoring logic)
+            import pandas as pd
+            news_df = pd.DataFrame(news_items)
+            if not news_df.empty and 'publishedAt' in news_df.columns:
+                news_df['date'] = pd.to_datetime(news_df['publishedAt']).dt.date
+            elif not news_df.empty and 'date' in news_df.columns:
+                news_df['date'] = pd.to_datetime(news_df['date']).dt.date
+            else:
+                news_df['date'] = pd.NaT
+            # Simple sentiment: count of news per day (replace with your scoring logic if available)
+            sentiment_daily = news_df.groupby('date').size().reindex(
+                pd.to_datetime(data['timestamp']).dt.date.unique(), fill_value=0).reset_index()
+            sentiment_daily.columns = ['date', 'sentiment_score']
+            data['date'] = pd.to_datetime(data['timestamp']).dt.date
+            data = data.merge(sentiment_daily, on='date', how='left')
+            data.drop(columns=['date'], inplace=True)
             logger.info(f"Collected {len(data)} samples for {symbol}")
             logger.info(f"Data columns: {data.columns.tolist()}")
             logger.info(f"Date range: {data.index.min()} to {data.index.max()}")
             all_data.append(data)
         else:
             logger.warning(f"No data collected for {symbol}")
+            # Check if token is missing for debug
+            if hasattr(collector, 'symbol_token_map') and symbol not in collector.symbol_token_map:
+                missing_token_symbols.append(symbol)
+    if missing_token_symbols:
+        logger.error(f"Symbols missing tokens (not found in token map): {missing_token_symbols}")
+        if hasattr(collector, 'symbol_token_map'):
+            logger.debug(f"Available token map keys: {list(collector.symbol_token_map.keys())[:50]} ... (total {len(collector.symbol_token_map)})")
     
     if not all_data:
         logger.error("No data collected for any symbol. Cannot proceed with training.")
@@ -426,5 +459,9 @@ if __name__ == "__main__":
         logger.info("Model training completed successfully")
         
     except Exception as e:
-        logger.error(f"Training failed: {str(e)}", exc_info=True)
+        try:
+            logger.error(f"Training failed: {str(e)}", exc_info=True)
+        except Exception:
+            import sys
+            print(f"Training failed: {str(e)}", file=sys.stderr)
         sys.exit(1)

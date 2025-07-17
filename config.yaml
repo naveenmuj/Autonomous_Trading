@@ -1,169 +1,57 @@
-# API Configuration
 apis:
-  newsapi:
-    api_key: "dc5b0c4b4bae4709b4a0f28f80c32dee"
-  finnhub:
-    api_key: "d0qoce9r01qg1llav1a0d0qoce9r01qg1llav1ag"
   angel_one:
-    api_key: "N46Ju7kE"
-    client_id: "AAAM842306"
-    mpin: "9742"
-    totp_secret: "VFEYK4LXWYDIEMTYLRG7LFK2SA"
-
-notifications:
-  smtp:
-    server: smtp.example.com
-    port: 587
-    user: your@email.com
-    password: yourpassword
-    to: recipient@email.com
-
-# Trading Configuration
-trading:
-  mode: "simulation" # Can be "simulation" or "live"
-  paper_trading_days: 30
-  max_positions: 5
-  risk_percentage: 2 # Maximum risk per trade as percentage of portfolio
-  default_quantity: 1
-  risk:
-    position_size: 0.02 # 2% of capital per trade
-    stop_loss: 0.02 # 2% stop loss
-    risk_per_trade: 0.01 # 1% risk per trade
-  # Data collection and trading configuration
-  data:
-    mode: "auto" # Can be "manual" or "auto"
-    manual_symbols:
-    - "RELIANCE.NS"
-    - "TCS.NS"
-    - "HDFCBANK.NS"
-    - "INFY.NS"
-    - "ICICIBANK.NS"
-    auto:
-      market_caps: [ "large", "mid", "small" ] # Include all market caps
-      min_volume: 100000 # Minimum daily trading volume
-      sectors: [] # Leave empty for all sectors, or specify e.g. ["IT", "BANKS"]
-    exclude_symbols: [] # Symbols to exclude in auto mode
-    # Always include these indices regardless of mode
-    # indices:
-    #   - "NIFTY50" # NIFTY 50 Index
-    #   - "BANKNIFTY" # Bank NIFTY Index
-
-    # Strategy Configuration
-  strategy:
-    confidence_levels:
-      strong_buy: 0.7
-      weak_buy: 0.6
-      confidence_boost: 0.2
-
-    # Technical indicator parameters
-    indicators:
-      rsi:
-        period: 14
-        overbought: 70
-        oversold: 30
-      macd:
-        fast: 12
-        slow: 26
-        signal: 9
-      bollinger:
-        period: 20
-        std_dev: 2
-
-    # Technical indicator parameters only
-    model_indicators:
-
-      features:
-        technical_indicators:
-          price_action: true
-          trend_indicators:
-            sma: [ 10, 20, 50, 200 ]
-            ema: [ 9, 21 ]
-            macd:
-              fast: 12
-              slow: 26
-              signal: 9
-          momentum_indicators:
-            rsi:
-              period: 14
-              overbought: 70
-              oversold: 30
-            stochastic:
-              k_period: 14
-              d_period: 3
-            adx:
-              period: 14
-          volatility_indicators:
-            bollinger_bands:
-              period: 20
-              std_dev: 2
-            atr:
-              period: 14
-          volume_indicators:
-            obv: true
-            volume_sma: 20
-          support_resistance:
-            pivot_points: true
-            fibonacci: true
-          pattern_recognition:
-            candlestick_patterns: true
-            chart_patterns: true
-
-      market_context:
-        market_regime: true
-        sector_performance: true
-        market_breadth: true
-        vix: true
-
-      sentiment_analysis:
-        enabled: true
-        sources: [ "news", "social_media" ]
-
-      derivatives:
-        option_chain: true
-        open_interest: true
-        put_call_ratio: true
-
-      institutional_data:
-        fii_dii_flow: true
-        delivery_positions: true
-
-    training:
-      epochs: 200
-      batch_size: 64
-      validation_split: 0.2
-      early_stopping:
-        patience: 10
-        min_delta: 0.001
-      optimizer:
-        type: "adam"
-        learning_rate: 0.001
-        beta_1: 0.9
-        beta_2: 0.999
-      regularization:
-        dropout: 0.2
-        l2: 0.01
-      hyperparameter_tuning:
-        enabled: true
-        trials: 50
-        max_epochs: 300
-
-  # Trading rules
-  rules:
-    min_confidence: 0.6
-    profit_target: 0.03 # 3%
-    stop_loss: 0.02 # 2% 
-    trailing_stop: true
-
-  symbols:
-    mode: "auto" # Can be "auto" or "manual"
-    # If mode is auto, will fetch top N stocks by market cap
-    top_n_stocks: 50
-    # If mode is manual, will use this list
-    manual_list: [ "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS" ]
-
-# Data Collection Configuration  
+    api_key: N46Ju7kE
+    client_id: AAAM842306
+    mpin: '9742'
+    totp_secret: VFEYK4LXWYDIEMTYLRG7LFK2SA
+  finnhub:
+    api_key: d0qoce9r01qg1llav1a0d0qoce9r01qg1llav1ag
+  gemini:
+    api_key: AIzaSyCeOZV5u9z7lUFPpJAx9bTuQ8b9cN52tOs
+    api_url: https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent
+    enable_training: false
+automation:
+  api_key_rotation:
+    alert_days_before_expiry: 5
+    enabled: true
+  data_ingestion:
+    enabled: true
+    schedule: hourly
+  deployment:
+    auto_promote_best: true
+    enabled: true
+  documentation:
+    auto_update: true
+    enabled: true
+  error_notification:
+    enabled: true
+    method: email
+    recipients:
+    - your@email.com
+  feature_engineering:
+    enabled: true
+    llm_suggest: true
+  hyperparameter_tuning:
+    enabled: true
+    method: optuna
+  journaling:
+    auto_review: true
+    enabled: true
+  model_evaluation:
+    enabled: true
+    performance_threshold: 0.6
+  retraining:
+    enabled: true
+    frequency: daily
+    last_trained: '2025-06-27T17:52:59.001952'
+  scheduler:
+    enabled: true
+    time: "21:35" # 24-hour format, IST (e.g., 02:00 for 2 AM IST)
 data:
-  update_interval: 300 # 5 minutes
+  fallback_stocks:
+  - RELIANCE.NS
+  - TCS.NS
+  - HDFCBANK.NS
   historical_days: 365
   indicators:
   - RSI
@@ -171,61 +59,49 @@ data:
   - BB
   - SMA
   - EMA
-  websocket:
-    retry:
-      max_attempts: 3
-      initial_delay: 3 # seconds
-      strategy: 1 # 1 for linear, 2 for exponential
-      multiplier: 2 # for exponential backoff
-      max_duration: 30 # seconds
-    mode: 2 # MODE_QUOTE for better market depth data
-    exchange: "NSE" # Default exchange
-    correlation_id: "stream_{timestamp}" # {timestamp} will be replaced with current time
-    auto_reconnect: true
-  fallback_stocks: [ "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS" ]
   indices:
-    nifty50: "^NSEI"
-    india_vix: "^INDIAVIX"
-
-# Logging Configuration
+    india_vix: ^INDIAVIX
+    nifty50: ^NSEI
+  update_interval: 300
+  websocket:
+    auto_reconnect: true
+    correlation_id: stream_{timestamp}
+    exchange: NSE
+    mode: 2
+    retry:
+      initial_delay: 3
+      max_attempts: 3
+      max_duration: 30
+      multiplier: 2
+      strategy: 1
 logging:
-  level: "INFO"
-  file_path: "logs/app.log"
-  max_size: 10485760 # 10MB
   backup_count: 5
-
-# Model Configuration
+  file_path: logs/app.log
+  level: INFO
+  max_size: 10485760
 model:
-  type: "PPO" # Can be "PPO", "A2C", "DQN"
-  training:
-    total_timesteps: 100000
-    eval_freq: 10000
-    n_eval_episodes: 5
-    save_freq: 10000
-    learning_rate: 0.0003
-    batch_size: 64
-    n_epochs: 10
-    gamma: 0.99
-    device: "auto" # Can be "cpu", "cuda", or "auto"
-    clip_range: 0.2
-    ent_coef: 0.01
-    gae_lambda: 0.95
-    max_grad_norm: 0.5
-    target_kl: 0.015
-    update_epochs: 4
-    warmup_steps: 1000
-
   architecture:
-    policy: "MlpPolicy"
+    policy: MlpPolicy
     policy_kwargs:
-      net_arch:
-        pi: [ 128, 128 ] # Policy network
-        vf: [ 128, 128 ] # Value function network
-      activation_fn: "tanh"
-      ortho_init: true
+      activation_fn: tanh
       log_std_init: -2
+      net_arch:
+        pi:
+        - 128
+        - 128
+        vf:
+        - 128
 
+        - 128
+      ortho_init: true
   env:
+    activation_fn: tanh
+    constraints:
+      max_drawdown: 0.15
+      max_holding_period: 100
+      max_position_size: 0.2
+      max_trades_per_episode: 10
+      min_holding_period: 5
     features:
     - open
     - high
@@ -238,73 +114,232 @@ model:
     - MACD
     - BB_upper
     - BB_lower
-    trading:
-      initial_balance: 50000.0
-      buy_cost_pct: 0.001 # 0.1% trading cost
-      sell_cost_pct: 0.001
-      max_position: 0.9 # Maximum amount to invest
-      max_trades: 5
-      min_trade_amount: 1000
+    net_arch:
+      pi:
+      - 64
+      - 64
+      vf:
+      - 64
+      - 64
     rewards:
-      min_price_change: -0.1
-      max_price_change: 0.1
-      min_value_change: -1
-      max_value_change: 1.0
-      min_reward: -1
-      max_reward: 1.0
-      value_change_weight: 0.5
       action_weights:
         buy:
           gain: 1.0
           loss: 0.5
+        hold:
+          multiplier: 0.1
         sell:
           gain: 1.0
           loss: 0.5
-        hold:
-          multiplier: 0.1
-    constraints:
-      max_position_size: 0.2 # Maximum 20% of portfolio in one position
-      max_trades_per_episode: 10
-      min_holding_period: 5 # Minimum holding period in steps
-      max_holding_period: 100 # Maximum holding period in steps
-      max_drawdown: 0.15 # Maximum 15% drawdown
-    net_arch:
-      pi: [ 64, 64 ] # Policy network
-      vf: [ 64, 64 ] # Value function network
-    activation_fn: "tanh"
-
+      max_price_change: 0.1
+      max_reward: 1.0
+      max_value_change: 1.0
+      min_price_change: -0.1
+      min_reward: -1
+      min_value_change: -1
+      value_change_weight: 0.5
+    trading:
+      buy_cost_pct: 0.001
+      initial_balance: 50000.0
+      max_position: 0.9
+      max_trades: 5
+      min_trade_amount: 1000
+      sell_cost_pct: 0.001
   features:
     technical_indicators:
-      price_action: true
-      trend_indicators:
-        sma: [ 10, 20, 50, 200 ]
-        ema: [ 9, 21 ]
-        macd:
-          fast: 12
-          slow: 26
-          signal: 9
       momentum_indicators:
-        rsi:
-          period: 14
-          overbought: 70
-          oversold: 30
-        stochastic:
-          k_period: 14
-          d_period: 3
         adx:
           period: 14
-      volatility_indicators:
-        bollinger_bands:
-          period: 20
-          std_dev: 2
-        atr:
+        rsi:
+          overbought: 70
+          oversold: 30
           period: 14
-      volume_indicators:
-        obv: true
-        volume_sma: 20
-      support_resistance:
-        pivot_points: true
-        fibonacci: true
+        stochastic:
+          d_period: 3
+          k_period: 14
       pattern_recognition:
         candlestick_patterns: true
         chart_patterns: true
+      price_action: true
+      support_resistance:
+        fibonacci: true
+        pivot_points: true
+      trend_indicators:
+        ema:
+        - 9
+        - 21
+        macd:
+          fast: 12
+          signal: 9
+          slow: 26
+        sma:
+        - 10
+        - 20
+        - 50
+        - 200
+      volatility_indicators:
+        atr:
+          period: 14
+        bollinger_bands:
+          period: 20
+          std_dev: 2
+      volume_indicators:
+        obv: true
+        volume_sma: 20
+  training:
+    batch_size: 64
+    clip_range: 0.2
+    device: auto
+    ent_coef: 0.01
+    eval_freq: 10000
+    gae_lambda: 0.95
+    gamma: 0.99
+    learning_rate: 0.0003
+    max_grad_norm: 0.5
+    n_epochs: 10
+    n_eval_episodes: 5
+    save_freq: 10000
+    target_kl: 0.015
+    total_timesteps: 100000
+    update_epochs: 4
+    warmup_steps: 1000
+  type: PPO
+notifications:
+  smtp:
+    password: yourpassword
+    port: 587
+    server: smtp.example.com
+    to: recipient@email.com
+    user: your@email.com
+trading:
+  data:
+    auto:
+      market_caps:
+      - large
+      - mid
+      - small
+      min_volume: 100000
+      sectors: []
+    exclude_symbols: []
+    manual_symbols:
+    - RELIANCE.NS
+    - TCS.NS
+    # - HDFCBANK.NS
+    # - INFY.NS
+    # - ICICIBANK.NS
+    mode: manual
+  default_quantity: 1
+  max_positions: 5
+  mode: live # PATCH: Set to simulation for backtesting
+  paper_trading_days: 30
+  risk:
+    position_size: 0.05 # PATCH: Allow larger position size for more trades
+    risk_per_trade: 0.02
+    stop_loss: 0.02
+  risk_percentage: 2
+  rules:
+    min_confidence: 0.5 # PATCH: Lowered for more signals
+    profit_target: 0.02 # PATCH: Lowered for more exits
+    stop_loss: 0.02
+    trailing_stop: true
+  strategy:
+    confidence_levels:
+      confidence_boost: 0.2
+      strong_buy: 0.7
+      weak_buy: 0.6
+    indicators:
+      bollinger:
+        period: 20
+        std_dev: 2
+      macd:
+        fast: 12
+        signal: 9
+        slow: 26
+      rsi:
+        overbought: 70
+        oversold: 30
+        period: 14
+    model_indicators:
+      derivatives:
+        open_interest: true
+        option_chain: true
+        put_call_ratio: true
+      features:
+        technical_indicators:
+          momentum_indicators:
+            adx:
+              period: 14
+            rsi:
+              overbought: 70
+              oversold: 30
+              period: 14
+            stochastic:
+              d_period: 3
+              k_period: 14
+          pattern_recognition:
+            candlestick_patterns: true
+            chart_patterns: true
+          price_action: true
+          support_resistance:
+            fibonacci: true
+            pivot_points: true
+          trend_indicators:
+            ema:
+            - 9
+            - 21
+            macd:
+              fast: 12
+              signal: 9
+              slow: 26
+            sma:
+            - 10
+            - 20
+            - 50
+            - 200
+          volatility_indicators:
+            atr:
+              period: 14
+            bollinger_bands:
+              period: 20
+              std_dev: 2
+          volume_indicators:
+            obv: true
+            volume_sma: 20
+      institutional_data:
+        delivery_positions: true
+        fii_dii_flow: true
+      market_context:
+        market_breadth: true
+        market_regime: true
+        sector_performance: true
+        vix: true
+      sentiment_analysis:
+        enabled: true
+        sources:
+        - social_media
+    training:
+      batch_size: 64
+      early_stopping:
+        min_delta: 0.001
+        patience: 10
+      epochs: 200
+      hyperparameter_tuning:
+        enabled: true
+        max_epochs: 300
+        trials: 50
+      optimizer:
+        beta_1: 0.9
+        beta_2: 0.999
+        learning_rate: 0.001
+        type: adam
+      regularization:
+        dropout: 0.2
+        l2: 0.01
+      validation_split: 0.2
+  symbols:
+    manual_list:
+    - RELIANCE.NS
+    - TCS.NS
+    # - HDFCBANK.NS  
+    mode: manual
+    top_n_stocks: 50

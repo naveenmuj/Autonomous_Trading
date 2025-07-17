@@ -3,13 +3,27 @@ import logging
 import threading
 import time
 import random
+import math
 from typing import Dict, List, Optional, Any
 from datetime import datetime
-from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 from .market_utils import is_market_open, format_time_until_market_open
 import pandas as pd  # Import pandas for timestamp conversion
+from SmartApi.smartWebSocketV2 import SmartWebSocketV2
+import os  # Import os for directory creation
 
 logger = logging.getLogger(__name__)
+
+# Add app_logger for app.log
+app_logger = logging.getLogger('app_logger')
+app_log_path = 'logs/2025-07-09/app.log'  # You may want to make this dynamic
+app_log_dir = os.path.dirname(app_log_path)
+os.makedirs(app_log_dir, exist_ok=True)
+if not any(isinstance(h, logging.FileHandler) and getattr(h, 'baseFilename', '').endswith('app.log') for h in app_logger.handlers):
+    app_log_handler = logging.FileHandler(app_log_path)
+    app_log_handler.setLevel(logging.INFO)
+    app_log_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+    app_logger.addHandler(app_log_handler)
+    app_logger.propagate = False
 
 class MarketDataWebSocket(SmartWebSocketV2):
     # Exchange type constants
@@ -40,13 +54,18 @@ class MarketDataWebSocket(SmartWebSocketV2):
     INITIAL_BACKOFF = 1.0    # Initial backoff delay in seconds
     MAX_BACKOFF = 300.0      # Maximum backoff delay in seconds
 
-    def __init__(self, auth_token: str, api_key: str, client_code: str, feed_token: str, config: Dict[str, Any] = None):
+    # DEBUG: Set to True to force single-token subscription for debugging
+    DEBUG_SINGLE_TOKEN_SUB = False  # PATCH: Set to False to allow real subscriptions
+    DEBUG_TOKEN = '12018'  # SUZLON NSE token
+
+    def __init__(self, auth_token: str, api_key: str, client_code: str, feed_token: str, config: Dict[str, Any] = None, debug: bool = False):
         """Initialize WebSocket with improved state tracking"""
         self.auth_token = auth_token
         self.api_key = api_key
         self.client_code = client_code
         self.feed_token = feed_token
         self.config = config or {}
+        self.debug = debug
         
         # State tracking
         self._connection_state = self.DISCONNECTED
@@ -72,8 +91,18 @@ class MarketDataWebSocket(SmartWebSocketV2):
         self._state_lock = threading.Lock()
         self._reconnect_lock = threading.Lock()
         
-        # WebSocket instance
-        self.ws = None
+        # WebSocket instance: use SmartWebSocketV2 as in test script
+        self.ws = SmartWebSocketV2(
+            auth_token=self.auth_token,
+            api_key=self.api_key,
+            feed_token=self.feed_token,
+            client_code=self.client_code
+        )
+        # Assign event/callback handlers as in the test script
+        self.ws.on_open = self._on_open  # Use correct handler
+        self.ws.on_data = self._on_message  # Use correct handler
+        self.ws.on_error = self._on_error  # Use correct handler
+        self.ws.on_close = self._on_close  # Use correct handler
         
         # Initialize logging
         logger.info("Initializing Market Data WebSocket with enhanced retry settings...")
@@ -159,14 +188,14 @@ class MarketDataWebSocket(SmartWebSocketV2):
         def send_heartbeat():
             while not self.stopping:
                 try:
-                    if self.ws and time.time() - self._last_heartbeat >= self._heartbeat_interval:
-                        self.ws.send('ping')
-                        logger.debug("Sent heartbeat ping")
-                        self._last_heartbeat = time.time()
-                    time.sleep(1)  # Check every second
+                    # SmartWebSocketV2 does not expose a public send() method for manual ping.
+                    # If ping/heartbeat is needed, use the library's built-in keepalive or add support in SmartWebSocketV2.
+                    # self.ws.send('ping')  # <-- Removed: Not supported by SmartWebSocketV2
+                    # logger.debug("Sent heartbeat ping")
+                    self._last_heartbeat = time.time()
+                    time.sleep(self._heartbeat_interval)
                 except Exception as e:
                     logger.error(f"Error in heartbeat: {str(e)}")
-                    # Don't spam logs with the same error
                     time.sleep(5)
 
         self._heartbeat_thread = threading.Thread(target=send_heartbeat, daemon=True)
@@ -178,64 +207,49 @@ class MarketDataWebSocket(SmartWebSocketV2):
         return self._connection_event.wait(timeout=timeout)
         
     def connect(self) -> None:
-        """Connect to WebSocket with enhanced error handling"""
+        """Connect using SmartWebSocketV2 logic (call self.ws.connect)"""
         try:
             # Check market hours
             if not is_market_open():
                 wait_time = format_time_until_market_open()
                 logger.warning(f"Market is currently closed. Next market opening in {wait_time}")
-                logger.info("Proceeding with connection in simulation mode...")
-            
-            # Set up WebSocket URL with authentication
-            url = f"{self.WEBSOCKET_URL}?clientCode={self.client_code}&feedToken={self.feed_token}&apiKey={self.api_key}"
-            
-            # Create WebSocket instance
-            import websocket
-            websocket.enableTrace(True)  # Enable trace for debugging
-            self.ws = websocket.WebSocketApp(
-                url,
-                on_message=self._on_message,
-                on_error=self._on_error,
-                on_close=self._on_close,
-                on_open=self._on_open,
-                header={
-                    'Authorization': f'Bearer {self.auth_token}',
-                    'x-api-key': self.api_key,
-                    'x-client-code': self.client_code,
-                    'x-feed-token': self.feed_token
-                }
-            )
-            
-            # Start WebSocket in a thread with proper parameters
-            self.ws_thread = threading.Thread(
-                target=lambda: self.ws.run_forever(
-                    ping_interval=20,  # Send ping every 20 seconds
-                    ping_timeout=10,   # Wait 10 seconds for pong response
-                    ping_payload='ping'  # Use 'ping' as the ping message
-                )
-            )
-            self.ws_thread.daemon = True
-            self.ws_thread.start()
-            
-            logger.info("WebSocket connection initiated")
-            
+                # Removed simulation mode: always connect, just log
+            else:
+                logger.info("[DIAGNOSTIC] WebSocket is running in LIVE mode.")
+
+            # Set up connection state
+            self.connection_state = self.CONNECTING
+            self._connection_ready = False
+            self._connection_event.clear()
+            self.stopping = False
+
+            # Call SmartWebSocketV2 connect
+            self.ws.connect()
+            logger.info("WebSocket connection initiated (SmartWebSocketV2 logic)")
         except Exception as e:
             self.connection_state = self.DISCONNECTED
             logger.error(f"Connection error: {str(e)}")
             raise
 
     def _on_open(self, ws=None):
-        """Handle WebSocket connection open with improved state management"""
+        """Handle WebSocket connection open with improved state management and diagnostics"""
+        logger.info("[HANDLER] _on_open called")
         try:
-            logger.info("WebSocket connection opened")
+            logger.info("WebSocket connection opened [DIAGNOSTIC]")
             self.connection_state = self.CONNECTED
             self._connection_ready = True
             self._connection_event.set()
             self._last_heartbeat = time.time()
+            self._last_message_time = time.time()
             
             # Start heartbeat monitoring if not already running
             if not self._heartbeat_thread or not self._heartbeat_thread.is_alive():
                 self._start_heartbeat()
+            
+            # Always subscribe to debug token for diagnostics
+            if self.DEBUG_SINGLE_TOKEN_SUB:
+                logger.info(f"[HANDLER] Subscribing to debug token {self.DEBUG_TOKEN} in _on_open")
+                self.subscribe([self.DEBUG_TOKEN], self.MODE_QUOTE)
             
             # Resubscribe to existing tokens
             existing_subscriptions = dict(self.subscribed_tokens)  # Make a copy
@@ -264,9 +278,9 @@ class MarketDataWebSocket(SmartWebSocketV2):
             self.connection_state = self.DISCONNECTED
 
     def _on_close(self, ws=None, close_status_code=None, close_msg=None):
-        """Handle WebSocket connection close"""
+        logger.info(f"[HANDLER] _on_close called (Status: {close_status_code}, Message: {close_msg})")
         try:
-            logger.info(f"WebSocket connection closed (Status: {close_status_code}, Message: {close_msg})")
+            logger.info(f"WebSocket connection closed (Status: {close_status_code}, Message: {close_msg}) [DIAGNOSTIC]")
             self.connection_state = self.DISCONNECTED
             self._connection_ready = False
             self._connection_event.clear()
@@ -280,20 +294,19 @@ class MarketDataWebSocket(SmartWebSocketV2):
             logger.error(f"Error in connection close handler: {str(e)}")
             self.connection_state = self.DISCONNECTED
 
-    def close(self):
-        """Close WebSocket connection cleanly"""
-        try:
-            self.stopping = True
-            if self.ws:
-                self.ws.close()
-            self.connection_state = self.DISCONNECTED
-            logger.info("WebSocket connection closed")
-        except Exception as e:
-            logger.error(f"Error closing WebSocket: {str(e)}")
+    def _on_error(self, ws, error):
+        logger.error(f"[HANDLER] _on_error called: {error}")
+        logger.error(f"WebSocket error: {error} [DIAGNOSTIC]")
 
     def _on_message(self, ws=None, message=None):
-        """Handle raw WebSocket messages"""
+        logger.debug(f"[HANDLER] _on_message called with message: {repr(message)}")
+        # Aggressive diagnostics: log every raw message
+        app_logger = logging.getLogger("app")
+        app_logger.info(f"[RAW_WS_MESSAGE] {repr(message)}")
+        # ...existing code...
         try:
+            logger.debug(f"[WS-RAW] Received message: {repr(message)}")
+            self._last_message_time = time.time()
             if not message:
                 return
                 
@@ -308,24 +321,37 @@ class MarketDataWebSocket(SmartWebSocketV2):
                     if 'action' in data:
                         if data['action'] == 'subscribe':
                             if data.get('status', False):
-                                logger.info("Subscription successful")
+                                logger.info(f"Subscription successful: {data}")
+                                app_logger.info(f"[SUBSCRIBE_OK] {data}")
                             else:
-                                logger.error(f"Subscription failed: {data.get('message', 'Unknown error')}")
+                                logger.error(f"Subscription failed: {data.get('message', 'Unknown error')} | Full response: {data}")
+                                app_logger.error(f"[SUBSCRIBE_FAIL] {data}")
                         elif data['action'] == 'unsubscribe':
                             if data.get('status', False):
-                                logger.info("Unsubscription successful")
+                                logger.info(f"Unsubscription successful: {data}")
                             else:
-                                logger.error(f"Unsubscription failed: {data.get('message', 'Unknown error')}")
+                                logger.error(f"Unsubscription failed: {data.get('message', 'Unknown error')} | Full response: {data}")
+                        else:
+                            logger.info(f"WebSocket message: {data}")
                 except json.JSONDecodeError:
                     logger.warning(f"Received non-JSON text message: {message}")
                 return
             
             # Handle binary data
             if isinstance(message, bytes):
+                # Patch: log every tick received for diagnostics
+                try:
+                    tick_token = self._extract_token_from_binary(message)
+                    logger.debug(f"Received binary tick for token {tick_token}")
+                    app_logger.info(f"[BINARY_TICK_RAW] token={tick_token} bytes={message[:32].hex()}")
+                except Exception:
+                    logger.debug("Received binary tick (token extraction failed)")
+                    app_logger.info(f"[BINARY_TICK_RAW] token=UNKNOWN bytes={message[:32].hex()}")
                 self._handle_binary_data(message)
             
         except Exception as e:
             logger.error(f"Error in raw message handler: {str(e)}")
+            app_logger.error(f"[WS_HANDLER_ERROR] {str(e)} | Message: {repr(message)}")
 
     def _handle_binary_data(self, data: bytes):
         """Handle binary market data according to WebSocket 2.0 spec"""
@@ -382,7 +408,12 @@ class MarketDataWebSocket(SmartWebSocketV2):
 
             # Update live feed
             self.live_feed[token] = tick_data
-            
+
+            # Log every received tick for debugging
+            logger.info(f"[WebSocketTick] Token: {token}, LTP: {tick_data['ltp']}, Time: {tick_data['timestamp']}")
+            logger.debug(f"[TickData] {tick_data}")
+            # Log LTP to app.log as well
+            app_logger.info(f"[LTP] Token: {token}, LTP: {tick_data['ltp']}, Time: {tick_data['timestamp']}")
             # Notify callbacks with thread safety
             with self._callback_lock:
                 for callback in self.tick_callbacks:
@@ -424,46 +455,70 @@ class MarketDataWebSocket(SmartWebSocketV2):
             raise
 
     def subscribe(self, tokens, mode=None):
-        """Subscribe to market data for given tokens
-        
-        Args:
-            tokens (List[str]): List of instrument tokens to subscribe to
-            mode (int, optional): Subscription mode (LTP/QUOTE/SNAPQUOTE). 
-                                Defaults to QUOTE if not specified.
-        """
+        """Subscribe to market data for given tokens using SmartWebSocketV2.subscribe() with diagnostics"""
         try:
+            # Force test subscription to RELIANCE.NS token for diagnostics
+            TEST_TOKEN = None
+            for t, s in self.subscribed_tokens.items():
+                if str(t).startswith("RELIANCE") or str(t) == "500325":
+                    TEST_TOKEN = t
+                    break
+            if not TEST_TOKEN:
+                # Try to add a known token (should be mapped in DataCollector)
+                tokens = list(tokens) + ["RELIANCE.NS"]
+                logger.warning("[DEBUG] Forcing test subscription to RELIANCE.NS for diagnostics.")
+            
+            if self.DEBUG_SINGLE_TOKEN_SUB:
+                logger.warning(f"[DEBUG] Forcing single-token subscription for debugging: {self.DEBUG_TOKEN}")
+                tokens = [self.DEBUG_TOKEN]
             if not self._connection_ready:
                 logger.warning("WebSocket not ready, adding to pending subscriptions")
                 self.pending_subscriptions.append((tokens, mode))
                 return
-
             if not tokens:
                 logger.warning("No tokens provided for subscription")
                 return
-                
-            # Use default mode if not specified
             if mode is None:
                 mode = self.MODE_QUOTE
-
-            # Format subscription message according to SmartWebSocket V2 spec
-            subscription_msg = {
-                "action": "subscribe",
-                "key": tokens,
-                "messageType": str(mode)  # Convert mode to string as required by API
-            }
-
-            # Send subscription request
-            self.ws.send(json.dumps(subscription_msg))
-            
-            # Store subscribed tokens with their mode
+            token_list = [{
+                "exchangeType": 1,  # NSE
+                "tokens": [str(token) for token in tokens]
+            }]
+            correlation_id = f"websocket_{int(time.time())}"
+            logger.warning(f"[DEBUG] Subscribing with token_list: {token_list}, mode: {mode}, correlation_id: {correlation_id}")
+            app_logger = logging.getLogger("app")
+            app_logger.info(f"[SUBSCRIBE_ATTEMPT] tokens={tokens} mode={mode} correlation_id={correlation_id}")
+            try:
+                self.ws.subscribe(
+                    correlation_id=correlation_id,
+                    mode=mode,
+                    token_list=token_list
+                )
+                logger.info(f"Sent SmartWebSocketV2 subscription for tokens: {tokens} in mode {mode}")
+                app_logger.info(f"[SUBSCRIBE_SENT] tokens={tokens} mode={mode}")
+            except Exception as e:
+                logger.error(f"Error in SmartWebSocketV2.subscribe: {str(e)} | token_list: {token_list}")
+                app_logger.error(f"[SUBSCRIBE_ERROR] {str(e)} | token_list={token_list}")
             for token in tokens:
                 self.subscribed_tokens[token] = mode
-                
-            logger.info(f"Sent subscription request for {len(tokens)} tokens in mode {mode}")
-
+            self.log_subscription_state()
+            import threading
+            def warn_if_no_messages():
+                time.sleep(10)
+                if time.time() - getattr(self, '_last_message_time', 0) > 9:
+                    logger.warning("[DIAGNOSTIC] No websocket messages received within 10 seconds of subscription!")
+                    app_logger.warning("[NO_TICKS_WARNING] No websocket messages received within 10 seconds of subscription!")
+            threading.Thread(target=warn_if_no_messages, daemon=True).start()
         except Exception as e:
-            logger.error(f"Error in subscribe: {str(e)}")
+            logger.error(f"Error in subscribe: {str(e)} | Tokens: {tokens}")
+            app_logger = logging.getLogger("app")
+            app_logger.error(f"[SUBSCRIBE_FATAL] {str(e)} | Tokens: {tokens}")
             raise
+
+    def log_subscription_state(self):
+        """Log the current state of all subscribed tokens for diagnostics"""
+        logger.info(f"[SubscriptionState] Subscribed tokens: {list(self.subscribed_tokens.keys())}")
+        logger.info(f"[SubscriptionState] Total: {len(self.subscribed_tokens)} tokens")
 
     def unsubscribe(self, tokens):
         """Unsubscribe from market data for given tokens
@@ -512,6 +567,12 @@ class MarketDataWebSocket(SmartWebSocketV2):
                 logger.warning("Token not provided for market data lookup")
                 return None
 
+            if not self.is_connected:
+                logger.warning(f"WebSocket is not connected when requesting market data for token {token}")
+
+            if token not in self.subscribed_tokens:
+                logger.warning(f"Token {token} was never subscribed. Subscribed tokens: {list(self.subscribed_tokens.keys())}")
+
             data = self.live_feed.get(str(token))
             if data:
                 # Ensure numeric values are properly converted
@@ -520,26 +581,21 @@ class MarketDataWebSocket(SmartWebSocketV2):
                     'best_bid_price', 'best_bid_quantity',
                     'best_ask_price', 'best_ask_quantity'
                 ]
-                
                 for field in numeric_fields:
                     if field in data:
                         try:
                             data[field] = float(data[field])
                         except (ValueError, TypeError):
                             data[field] = 0.0
-                
                 # Ensure timestamp is properly formatted
                 if 'timestamp' in data and not isinstance(data['timestamp'], datetime):
                     try:
                         data['timestamp'] = pd.to_datetime(data['timestamp'])
                     except:
                         data['timestamp'] = datetime.now()
-                
                 return data
-                
-            logger.debug(f"No market data available for token {token}")
+            logger.debug(f"No market data available for token {token}. Connection ready: {self._connection_ready}, Subscribed: {token in self.subscribed_tokens}")
             return None
-            
         except Exception as e:
             logger.error(f"Error getting market data for token {token}: {str(e)}")
             return None

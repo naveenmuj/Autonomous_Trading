@@ -135,3 +135,35 @@ class TradingAgent:
         except Exception as e:
             logger.error(f"Error saving model: {str(e)}")
             raise
+        
+    def get_signal(self, df, deterministic=True):
+        """
+        Given a DataFrame of market data, prepare the latest state and return the RL agent's action as a signal.
+        Returns: -1 (sell), 0 (hold), 1 (buy)
+        """
+        if self.model is None:
+            logger.warning("RL model not loaded or trained. Returning hold signal (0).")
+            return 0
+        try:
+            # Prepare the latest state (assume last row, drop non-numeric columns)
+            if hasattr(df, 'select_dtypes'):
+                state = df.select_dtypes(include=[np.number]).iloc[-1].values
+                logger.debug(f"RL get_signal: Prepared state from DataFrame with shape {df.shape}, numeric state shape: {state.shape}")
+            else:
+                state = np.array(df.iloc[-1])
+                logger.debug(f"RL get_signal: Used raw DataFrame row for state, shape: {state.shape if hasattr(state, 'shape') else type(state)}")
+            action, _ = self.predict(state.reshape(1, -1), deterministic=deterministic)
+            # Map action to signal: 0=hold, 1=buy, 2=sell (adjust if your RL env uses different mapping)
+            if isinstance(action, (np.ndarray, list)):
+                action = int(action[0])
+            if action == 1:
+                signal = 1  # buy
+            elif action == 2:
+                signal = -1  # sell
+            else:
+                signal = 0  # hold
+            logger.info(f"RL get_signal: action={action}, mapped signal={signal}")
+            return signal
+        except Exception as e:
+            logger.error(f"Error in get_signal: {e}")
+            return 0

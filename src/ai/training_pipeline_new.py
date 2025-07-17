@@ -60,7 +60,6 @@ class TrainingPipeline:
         if self.talib is None:
             logger.warning("TA-Lib not available. Technical analysis features will be limited.")
 
-    def preprocess_data(self, data: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
         """Preprocess data for model training"""
         try:
             if self.scaler is None:
@@ -81,6 +80,28 @@ class TrainingPipeline:
             self.X = X
             self.y = y
             
+            return X, y
+        except Exception as e:
+            logger.error(f"Error preprocessing data: {e}")
+            raise
+
+    def preprocess_data(self, data: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
+        """Preprocess data for model training, always including pattern and technical features."""
+        try:
+            if self.scaler is None:
+                raise ImportError("Scikit-learn StandardScaler not available")
+            # Calculate features first
+            features = self.engineer_features(data)
+            features = features.dropna()
+            # Always include 'pattern' and technical indicator columns
+            feature_cols = [col for col in features.columns if col not in ['target', 'returns']]
+            if 'pattern' not in feature_cols:
+                feature_cols.append('pattern')
+            X = self.scaler.fit_transform(features[feature_cols])
+            y = features['target'].values if 'target' in features.columns else None
+            self.X = X
+            self.y = y
+            logger.info(f"Training features used: {feature_cols}")
             return X, y
         except Exception as e:
             logger.error(f"Error preprocessing data: {e}")

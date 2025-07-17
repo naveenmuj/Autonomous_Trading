@@ -1,4 +1,5 @@
 import streamlit as st
+
 # Must set page config as the first Streamlit command
 st.set_page_config(
     page_title="Dashboard",
@@ -12,6 +13,12 @@ st.set_page_config(
     }
 )
 
+try:
+    import sys
+    print(f"[DEBUG] sys.version: {sys.version}")
+except Exception as e:
+    print(f"[DEBUG] sys import failed: {e}")
+
 import sys
 import os
 import yaml
@@ -19,7 +26,7 @@ import warnings
 import psutil
 import logging.handlers
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 import traceback
 import time
 import pandas as pd
@@ -38,6 +45,8 @@ import csv
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from pytz import timezone
+from concurrent_log_handler import ConcurrentRotatingFileHandler
 
 # Remove any existing handlers from the root logger
 for handler in logging.root.handlers[:]:
@@ -92,28 +101,28 @@ root_logger = logging.getLogger()
 root_logger.setLevel(logging.DEBUG)  # Set to DEBUG to capture all levels
 
 # App handler - Info and above
-app_handler = logging.handlers.RotatingFileHandler(
+app_handler = ConcurrentRotatingFileHandler(
     app_log, maxBytes=10*1024*1024, backupCount=5
 )
 app_handler.setLevel(logging.INFO)
 app_handler.setFormatter(detailed_formatter)
 
 # Trading handler - All levels
-trade_handler = logging.handlers.RotatingFileHandler(
+trade_handler = ConcurrentRotatingFileHandler(
     trade_log, maxBytes=10*1024*1024, backupCount=5
 )
 trade_handler.setLevel(logging.DEBUG)
 trade_handler.setFormatter(detailed_formatter)
 
 # Model handler - All levels
-model_handler = logging.handlers.RotatingFileHandler(
+model_handler = ConcurrentRotatingFileHandler(
     model_log, maxBytes=10*1024*1024, backupCount=5
 )
 model_handler.setLevel(logging.DEBUG)
 model_handler.setFormatter(detailed_formatter)
 
 # Debug handler - Debug only
-debug_handler = logging.handlers.RotatingFileHandler(
+debug_handler = ConcurrentRotatingFileHandler(
     debug_log, maxBytes=20*1024*1024, backupCount=10
 )
 debug_handler.setLevel(logging.DEBUG)
@@ -148,7 +157,6 @@ logger.info(f"Memory available: {psutil.virtual_memory().available / (1024*1024*
 logger.info(f"Disk space available: {psutil.disk_usage('/').free / (1024*1024*1024):.1f}GB")
 logger.info("=== System Check Complete ===")
 
-@st.cache_resource
 def load_config():
     """Load configuration file (cached by Streamlit)"""
     logger.info("Loading configuration...")
@@ -184,7 +192,6 @@ def load_config():
         logger.error(f"Error loading config: {e}")
         raise
 
-@st.cache_resource
 def load_pretrained_models(config):
     """Load pre-trained models for live trading. Retrain separately and reload as needed."""
     models = {}
@@ -245,28 +252,29 @@ def load_pretrained_models(config):
         logger.error(f"Failed to load Transformer model: {e}")
     return models
 
-@st.cache_resource
+# @st.cache_resource
 def initialize_components(config):
     """Initialize all system components, loading pre-trained models only."""
-    logger.info("Initializing system components...")
+    import streamlit as st
+    logger.info("=== ENTER initialize_components() ===")
+    print("=== ENTER initialize_components() ===")
     try:
-        # Initialize DataCollector
         collector = DataCollector(config)
-        
-        # Initialize Trade Manager
+        logger.info("Step 1: DataCollector initialized")
         trade_manager = TradeManager(config, collector)
-        
-        # Initialize Models (load pre-trained only)
+        logger.info("Step 2: TradeManager initialized")
         technical_analyzer = TechnicalAnalysisModel(config)
+        logger.info("Step 3: TechnicalAnalysisModel initialized")
         ai_model = AITrader(config)
+        logger.info("Step 4: AITrader initialized")
         pretrained_models = load_pretrained_models(config)
-        # Optionally, pass loaded models to AITrader/TechnicalAnalysisModel if needed
+        logger.info("Step 5: Pre-trained models loaded")
         if hasattr(ai_model, 'set_loaded_models'):
             ai_model.set_loaded_models(pretrained_models)
         if hasattr(technical_analyzer, 'set_loaded_models'):
             technical_analyzer.set_loaded_models(pretrained_models)
-        
-        # Initialize Dashboard
+        logger.info("Step 6: Initializing DashboardUI...")
+        print("=== initialize_components(): Instantiating DashboardUI ===")
         dashboard = DashboardUI(
             config=config,
             data_collector=collector,
@@ -274,13 +282,14 @@ def initialize_components(config):
             technical_analyzer=technical_analyzer,
             ai_model=ai_model
         )
-        
         logger.info("All components initialized successfully")
+        print("=== EXIT initialize_components() ===")
+        logger.info("=== EXIT initialize_components() ===")
         return dashboard
-        
     except Exception as e:
-        logger.error(f"Error initializing components: {str(e)}")
-        raise
+        logger.error(f"Error initializing components: {str(e)}", exc_info=True)
+        print(f"Error initializing components: {str(e)}")
+        return None
 
 def initialize_system():
     """Initialize system components with proper configuration"""
@@ -341,116 +350,77 @@ def send_retrain_notification(subject, body):
     except Exception as e:
         logger.error(f"Failed to send retrain notification: {e}")
 
-def retrain_model_job():
-    logger.info("Scheduled retraining started...")
-    csv_path = os.path.join(project_root, 'logs', 'retrain_history.csv')
-    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    try:
-        # Run your training script as a subprocess
-        result = subprocess.run(
-            [sys.executable, os.path.join(project_root, "src", "ai", "train.py")],
-            capture_output=True, text=True
-        )
-        success = result.returncode == 0
-        log_row = {
-            'timestamp': now,
-            'status': 'success' if success else 'error',
-            'stdout': result.stdout.strip()[:500],
-            'stderr': result.stderr.strip()[:500]
-        }
-        # Write/append to CSV
-        file_exists = os.path.isfile(csv_path)
-        with open(csv_path, 'a', newline='', encoding='utf-8') as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=['timestamp', 'status', 'stdout', 'stderr'])
-            if not file_exists:
-                writer.writeheader()
-            writer.writerow(log_row)
-        if success:
-            logger.info("Retraining completed successfully.")
-            send_retrain_notification(
-                subject="Model Retraining Success",
-                body=f"Retraining completed successfully at {now}.\n\nOutput:\n{result.stdout.strip()[:500]}"
-            )
-        else:
-            logger.error(f"Retraining failed: {result.stderr}")
-            send_retrain_notification(
-                subject="Model Retraining FAILED",
-                body=f"Retraining failed at {now}.\n\nError:\n{result.stderr.strip()[:500]}"
-            )
-            raise RuntimeError(f"Retraining failed: {result.stderr}")
-    except Exception as e:
-        logger.error(f"Retraining job error: {e}")
-        # Log error to CSV as well
-        with open(csv_path, 'a', newline='', encoding='utf-8') as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=['timestamp', 'status', 'stdout', 'stderr'])
-            if os.path.getsize(csv_path) == 0:
-                writer.writeheader()
-            writer.writerow({
-                'timestamp': now,
-                'status': 'error',
-                'stdout': '',
-                'stderr': str(e)
-            })
-        send_retrain_notification(
-            subject="Model Retraining ERROR",
-            body=f"Retraining job error at {now}.\n\nException:\n{str(e)}"
-        )
-        raise
+def run_training_pipeline():
+    # Create a unique scheduler log folder for this run
+    run_start = datetime.now()
+    run_dir = os.path.join(project_root, 'logs', run_start.strftime('%Y-%m-%d'), f'scheduler_{run_start.strftime("%H-%M-%S")}')
+    os.makedirs(run_dir, exist_ok=True)
+    summary_log_file = os.path.join(run_dir, 'scheduler_run.log')
+    debug_log_file = os.path.join(run_dir, 'debug.log')
+    with open(summary_log_file, 'a', encoding='utf-8') as f_summary, open(debug_log_file, 'a', encoding='utf-8') as f_debug:
+        f_summary.write(f"=== SCHEDULED TRAINING STARTED at {run_start.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+        try:
+            train_models_path = os.path.join(project_root, 'src', 'ai', 'train_models.py')
+            train_agent_path = os.path.join(project_root, 'src', 'ai', 'train_agent.py')
+            f_summary.write(f"Running train_models.py: {train_models_path}\n")
+            t1_start = datetime.now()
+            result1 = subprocess.run([sys.executable, train_models_path], capture_output=True, text=True)
+            t1_end = datetime.now()
+            f_summary.write(f"train_models.py started at {t1_start.strftime('%H:%M:%S')}, ended at {t1_end.strftime('%H:%M:%S')}\n")
+            f_summary.write(f"train_models.py status: {'SUCCESS' if result1.returncode == 0 else 'FAIL'}\n")
+            f_debug.write(f"\n--- train_models.py STDOUT ---\n{result1.stdout}\n")
+            if result1.stderr:
+                f_debug.write(f"\n--- train_models.py STDERR ---\n{result1.stderr}\n")
+            if result1.returncode != 0:
+                f_summary.write(f"train_models.py exited with code {result1.returncode}\n")
+                f_summary.write(f"=== SCHEDULED TRAINING FAILED at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+                return
+            f_summary.write(f"Running train_agent.py: {train_agent_path}\n")
+            t2_start = datetime.now()
+            result2 = subprocess.run([sys.executable, train_agent_path], capture_output=True, text=True)
+            t2_end = datetime.now()
+            f_summary.write(f"train_agent.py started at {t2_start.strftime('%H:%M:%S')}, ended at {t2_end.strftime('%H:%M:%S')}\n")
+            f_summary.write(f"train_agent.py status: {'SUCCESS' if result2.returncode == 0 else 'FAIL'}\n")
+            f_debug.write(f"\n--- train_agent.py STDOUT ---\n{result2.stdout}\n")
+            if result2.stderr:
+                f_debug.write(f"\n--- train_agent.py STDERR ---\n{result2.stderr}\n")
+            if result2.returncode != 0:
+                f_summary.write(f"train_agent.py exited with code {result2.returncode}\n")
+                f_summary.write(f"=== SCHEDULED TRAINING FAILED at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+                return
+            f_summary.write(f"=== SCHEDULED TRAINING SUCCESS at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+        except Exception as e:
+            f_summary.write(f"Exception in scheduled training: {e}\n")
+            f_summary.write(f"=== SCHEDULED TRAINING FAILED at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+            f_debug.write(f"\n--- Exception in scheduled training ---\n{e}\n")
+    # ...existing code...
 
 def main():
-    logger.info("Starting application...")
-    scheduler = BackgroundScheduler()
-    # Schedule retraining every day at 2am
-    scheduler.add_job(retrain_model_job, 'cron', hour=2, minute=0)
-    scheduler.start()
+    print("=== ENTER main() ===")
+    logging.info("=== ENTER main() ===")
     try:
-        # Create title and initialization message
-        st.title("")
-        init_message = st.empty()
-        init_message.info("Initializing trading system... This may take a few moments.")
-        
-        # Add initialization progress tracking
-        progress_text = st.empty()
-        progress_bar = st.progress(0)
-        
-        try:
-            # Load configuration (cached)
-            progress_text.text("Loading configuration...")
-            config = load_config()
-            progress_bar.progress(25)
-            
-            # Initialize components (cached)
-            progress_text.text("Initializing components...")
-            dashboard = initialize_components(config)
-            progress_bar.progress(75)
-            
-            # Clear initialization UI
-            init_message.empty()
-            progress_text.empty()
-            progress_bar.empty()
-            
-            # Run the dashboard
-            dashboard.run()
-            
-        except Exception as e:
-            logger.error(f"Error in main: {e}", exc_info=True)
-            st.error(f"""
-            ⚠️ System Error
-              An unexpected error occurred: {str(e)}
-            
-            Please check the logs in the {log_dir} directory for more details.
-            """)
-            
-    finally:
-        # Clear any remaining progress indicators
-        if 'progress_bar' in locals(): progress_bar.empty()
-        if 'progress_text' in locals(): progress_text.empty()
-        if 'init_message' in locals(): init_message.empty()
+        config = load_config()
+        print("=== main(): load_config() returned ===")
+        logging.info("=== main(): load_config() returned ===")
 
-if __name__ == "__main__":
-    os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-    warnings.filterwarnings("ignore")
-    main()
+        dashboard = initialize_components(config)
+        if dashboard is not None:
+            dashboard.render()
+        else:
+            print("Dashboard failed to initialize. Check logs for details.")
+            return
+    except Exception as e:
+        logging.exception("Exception in main(): %s", e)
+        print(f"Exception during initialization: {e}")
+        import traceback
+        print(traceback.format_exc())
+        return
+
+# Call main() at top level for Streamlit compatibility
+main()
 
 # NOTE: Model training is NOT performed at startup. Run ai/train.py or ai/training_pipeline.py separately to retrain models.
 # Reload models by restarting the app or by implementing a reload mechanism if needed.
+
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+warnings.filterwarnings("ignore")

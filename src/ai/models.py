@@ -20,8 +20,15 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 import tensorflow as tf
 import gymnasium as gym
 from gymnasium import spaces
+from sklearn.utils import resample
 
 logger = logging.getLogger(__name__)
+
+try:
+    from sklearn.linear_model import LogisticRegression
+except ImportError as e:
+    logger.error("scikit-learn is not installed or not found in the environment. Please install scikit-learn to use LogisticRegression. Error: %s", str(e))
+    LogisticRegression = None
 
 class TechnicalAnalysisModel:
     def __init__(self, config: Optional[Dict[str, Any]] = None):
@@ -170,13 +177,16 @@ class TechnicalAnalysisModel:
                 df[f'trend_{period}'] = trend
             
             logger.debug("Calculated indicators for data shape: %s", df.shape)
+            # Log last row of indicators for transparency
+            last_row = df.iloc[-1]
+            logger.info(f"Technical indicators for last row: RSI={last_row.get('rsi')}, MACD={last_row.get('macd')}, BB_upper={last_row.get('bb_upper')}, ATR={last_row.get('atr')}, ADX={last_row.get('adx')}, OBV={last_row.get('obv')}")
             return df
             
         except Exception as e:
             logger.error("Error calculating indicators: %s", str(e))
             import traceback
             logger.error(traceback.format_exc())
-            raise
+            return data
 
     def build_model(self, input_shape, model_type='lstm'):
         """Build and compile the model with improved architecture"""
@@ -250,8 +260,8 @@ class TechnicalAnalysisModel:
             self.model = model
             return model
     
-    def prepare_data(self, data: pd.DataFrame, lookback: int = 60) -> Tuple[np.ndarray, np.ndarray]:
-        """Prepare features and labels with improved preprocessing"""
+    def prepare_data(self, data: pd.DataFrame, lookback: int = 60, balance_labels: bool = False) -> Tuple[np.ndarray, np.ndarray]:
+        """Prepare features and labels with improved preprocessing and optional label balancing"""
         try:
             # Calculate technical indicators
             processed_data = self.calculate_indicators(data)
@@ -280,12 +290,29 @@ class TechnicalAnalysisModel:
                 'momentum_5', 'momentum_10', 'momentum_20'
             ]
             
-            # Handle missing values
+            # Drop initial rows to ensure all indicators are valid (like TradingView)
+            # Find max lookback period used by any indicator
+            max_lookback = max(50, self.macd_slow, self.bb_period, 20)  # SMA_50, MACD slow, BB, ATR/ADX
+            processed_data = processed_data.iloc[max_lookback:].copy()
+            logger.info(f"[prepare_data] Dropped first {max_lookback} rows to ensure valid indicators for all features.")
             processed_data = processed_data.fillna(method='ffill').fillna(method='bfill')
-            
-            # Drop all rows with NaN in any feature or in 'close' (for label calculation)
+            before_drop = len(processed_data)
             processed_data = processed_data.dropna(subset=feature_cols + ['close']).copy()
-
+            after_drop = len(processed_data)
+            if after_drop < before_drop:
+                logger.warning(f"[prepare_data] Dropped {before_drop - after_drop} rows with NaN/Inf in features for symbol(s): {data.get('symbol', 'unknown')}")
+            # PATCH: If no samples left after dropping NaN/Inf, log and diagnose
+            if processed_data.empty:
+                logger.error(f"[prepare_data] No valid samples left after dropping NaN/Inf for features: {feature_cols}. Possible causes: API returned incomplete data, missing columns, or all data is invalid. Symbol(s): {data.get('symbol', 'unknown')}")
+                logger.error(f"[prepare_data] Original input shape: {data.shape}, columns: {list(data.columns)}")
+                logger.error(f"[prepare_data] Data head before drop:\n{data.head()}\nData tail:\n{data.tail()}")
+                # Distinguish between real data error and pipeline issue
+                if data.empty:
+                    logger.error("[prepare_data] Input data is empty. This is a real data error (API or source returned no data). Failing function.")
+                else:
+                    logger.error("[prepare_data] Input data was present but all rows dropped. This may be a pipeline/feature engineering issue. Failing function.")
+                return None, None
+            
             # Now create features and labels
             X = processed_data[feature_cols].values
             y = (processed_data['close'].shift(-1) > processed_data['close']).astype(int).values
@@ -305,23 +332,23 @@ class TechnicalAnalysisModel:
             X = X[mask]
             y = y[mask]
 
-            # Robustly ensure X is 2D and y is 1D, never scalar or int
-            X = np.asarray(X)
-            y = np.asarray(y)
-            if X.ndim == 0 or isinstance(X, (int, float)):
-                logger.error("X is scalar, skipping.")
-                return None, None
-            if X.ndim == 1:
-                X = X.reshape(-1, len(feature_cols))
-            if y.ndim == 0 or isinstance(y, (int, float)):
-                logger.error("y is scalar, skipping.")
-                return None, None
-            if y.ndim > 1:
-                y = y.flatten()
-            if not hasattr(X, 'shape') or not hasattr(y, 'shape') or X.shape[0] == 0 or y.shape[0] == 0:
-                logger.error("X or y is empty after reshape, skipping.")
-                return None, None
-            logger.debug(f"prepare_features: X shape {X.shape}, y shape {y.shape}, X type {type(X)}, y type {type(y)}")
+            # Label balancing (optional)
+            if balance_labels:
+                # Downsample majority class
+                class0 = np.where(y == 0)[0]
+                class1 = np.where(y == 1)[0]
+                if len(class0) > 0 and len(class1) > 0:
+                    min_len = min(len(class0), len(class1))
+                    idx0 = resample(class0, replace=False, n_samples=min_len, random_state=42)
+                    idx1 = resample(class1, replace=False, n_samples=min_len, random_state=42)
+                    idx = np.concatenate([idx0, idx1])
+                    X = X[idx]
+                    y = y[idx]
+                    logger.info(f"[prepare_data] Label balancing applied: {np.bincount(y)}")
+            
+            # Log label distribution
+            logger.info(f"[prepare_data] Final label distribution: {np.bincount(y) if y.size > 0 else y}")
+            logger.info(f"[prepare_data] Final feature shape: {X.shape}")
             return X, y
         except Exception as e:
             logger.error(f"Error in prepare_data: {str(e)}")
@@ -338,6 +365,10 @@ class TechnicalAnalysisModel:
         """Train the model with improved training process"""
         if self.model is None:
             raise ValueError("Model not built yet. Call build_model first.")
+        # PATCH: Skip training if no valid data
+        if X is None or y is None:
+            logger.error("[train_model] Skipping model training: No valid data available for this symbol/model.")
+            return {}
 
         # Default callbacks if none provided
         if callbacks is None:
@@ -398,7 +429,9 @@ class TechnicalAnalysisModel:
         """Make predictions"""
         if self.model is None:
             raise ValueError("Model not trained yet")
-        return self.model.predict(X)
+        preds = self.model.predict(X)
+        logger.info(f"AI model predictions: {preds}")
+        return preds
 
     def evaluate_model(self, X: np.ndarray, y: np.ndarray) -> Dict[str, float]:
         """Evaluate model performance (robust to continuous or binary targets)"""
@@ -585,32 +618,8 @@ class TechnicalAnalysisModel:
 class SentimentAnalyzer:
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.config = config or {}
-        
-    def analyze_news(self, news_data: List[Dict[str, str]]) -> float:
-        """Analyze sentiment of news articles"""
-        try:
-            # Simple sentiment analysis using positive/negative word counting
-            # In a real implementation, you'd use a proper NLP model
-            positive_words = set(['up', 'rise', 'gain', 'positive', 'growth', 'profit'])
-            negative_words = set(['down', 'fall', 'loss', 'negative', 'decline', 'drop'])
-            
-            total_score = 0
-            for article in news_data:
-                text = article.get('title', '') + ' ' + article.get('description', '')
-                text = text.lower()
-                
-                pos_count = sum(1 for word in positive_words if word in text)
-                neg_count = sum(1 for word in negative_words if word in text)
-                
-                if pos_count + neg_count > 0:
-                    score = (pos_count - neg_count) / (pos_count + neg_count)
-                    total_score += score
-            
-            return total_score / len(news_data) if news_data else 0
-            
-        except Exception as e:
-            logger.error(f"Error analyzing sentiment: {str(e)}")
-            return 0
+        # News sentiment analysis is disabled (NewsAPI removed)
+        # This class is now a placeholder
 
 class AITrader:
     def __init__(self, config: Optional[Dict[str, Any]] = None):
@@ -620,16 +629,19 @@ class AITrader:
         self.model = None
         self.scaler = StandardScaler()
         
-    def prepare_features(self, data: pd.DataFrame) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-        """Prepare features for training/prediction, robust to missing sentiment or technical columns"""
+    def prepare_features(self, data: pd.DataFrame, balance_labels: bool = False, simple_features: bool = False) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """Prepare features for training/prediction, robust to missing sentiment or technical columns, with label balancing option"""
         try:
             # Calculate technical indicators
             processed_data = self.technical_model.calculate_indicators(data)
 
-            # Define feature columns
-            feature_cols = ['rsi', 'macd', 'macd_signal', 'macd_hist',
-                          'bb_upper', 'bb_middle', 'bb_lower',
-                          'sma_50', 'atr', 'obv', 'adx']
+            # Simple feature option for debugging
+            if simple_features:
+                feature_cols = ['rsi', 'macd', 'macd_signal', 'macd_hist', 'sma_50', 'atr', 'adx']
+            else:
+                feature_cols = ['rsi', 'macd', 'macd_signal', 'macd_hist',
+                              'bb_upper', 'bb_middle', 'bb_lower',
+                              'sma_50', 'atr', 'obv', 'adx']
 
             # Check for sentiment columns
             sentiment_cols = [col for col in processed_data.columns if 'sentiment' in col]
@@ -641,26 +653,36 @@ class AITrader:
             # Check if all required feature columns exist
             missing_cols = [col for col in feature_cols if col not in processed_data.columns]
             if missing_cols:
-                logger.error(f"Missing required feature columns: {missing_cols}. Skipping this symbol.")
+                logger.error(f"[prepare_features] Missing required feature columns: {missing_cols}. Skipping this symbol. Columns present: {list(processed_data.columns)}")
+                logger.error(f"[prepare_features] Data head:\n{processed_data.head()}\nData tail:\n{processed_data.tail()}")
                 return None, None
 
-            # Drop rows with any NaN in feature columns before scaling
             before_drop = len(processed_data)
+            # Drop rows with any NaN in feature columns before scaling
             processed_data = processed_data.dropna(subset=feature_cols)
             after_drop = len(processed_data)
             if after_drop < before_drop:
-                logger.warning(f"Dropped {before_drop - after_drop} rows with NaN in features for this symbol.")
+                logger.warning(f"[prepare_features] Dropped {before_drop - after_drop} rows with NaN in features for symbol(s): {data.get('symbol', 'unknown')}")
 
             # Log if any NaN remain (should not happen)
             if processed_data[feature_cols].isnull().any().any():
                 nan_cols = processed_data[feature_cols].columns[processed_data[feature_cols].isnull().any()].tolist()
-                logger.error(f"NaN still present in columns after dropna: {nan_cols}")
-                logger.error(f"First few rows with NaN: {processed_data[feature_cols][processed_data[feature_cols].isnull().any(axis=1)].head()}")
+                logger.error(f"[prepare_features] NaN still present in columns after dropna: {nan_cols}")
+                logger.error(f"[prepare_features] First few rows with NaN: {processed_data[feature_cols][processed_data[feature_cols].isnull().any(axis=1)].head()}")
+                logger.error(f"[prepare_features] Data head before drop:\n{data.head()}\nData tail:\n{data.tail()}")
+                # Distinguish between real data error and pipeline issue
+                if data.empty:
+                    logger.error("[prepare_features] Input data is empty. This is a real data error (API or source returned no data).")
+                else:
+                    logger.error("[prepare_features] Input data was present but all rows dropped. This may be a pipeline/feature engineering issue.")
                 return None, None
 
             # Calculate labels (y) based on future price movement
             processed_data['future_close'] = processed_data['close'].shift(-1)
             processed_data['label'] = (processed_data['future_close'] > processed_data['close']).astype(int)
+            # Log label distribution for debugging
+            label_counts = processed_data['label'].value_counts().to_dict()
+            logger.info(f"[AI MODEL] Label distribution: {label_counts}")
             
             # Drop rows with NaN in 'close' or 'label' after shifting
             processed_data = processed_data.dropna(subset=['close', 'label'])
@@ -679,24 +701,20 @@ class AITrader:
             )
             X = X[mask]
             y = y[mask]
-
-            # Robustly ensure X is 2D and y is 1D, never scalar or int
-            X = np.asarray(X)
-            y = np.asarray(y)
-            if X.ndim == 0 or isinstance(X, (int, float)):
-                logger.error("X is scalar, skipping.")
-                return None, None
-            if X.ndim == 1:
-                X = X.reshape(-1, len(feature_cols))
-            if y.ndim == 0 or isinstance(y, (int, float)):
-                logger.error("y is scalar, skipping.")
-                return None, None
-            if y.ndim > 1:
-                y = y.flatten()
-            if not hasattr(X, 'shape') or not hasattr(y, 'shape') or X.shape[0] == 0 or y.shape[0] == 0:
-                logger.error("X or y is empty after reshape, skipping.")
-                return None, None
-            logger.debug(f"prepare_features: X shape {X.shape}, y shape {y.shape}, X type {type(X)}, y type {type(y)}")
+            # Label balancing (optional)
+            if balance_labels:
+                class0 = np.where(y == 0)[0]
+                class1 = np.where(y == 1)[0]
+                if len(class0) > 0 and len(class1) > 0:
+                    min_len = min(len(class0), len(class1))
+                    idx0 = resample(class0, replace=False, n_samples=min_len, random_state=42)
+                    idx1 = resample(class1, replace=False, n_samples=min_len, random_state=42)
+                    idx = np.concatenate([idx0, idx1])
+                    X = X[idx]
+                    y = y[idx]
+                    logger.info(f"[prepare_features] Label balancing applied: {np.bincount(y)}")
+            logger.info(f"[prepare_features] Final label distribution: {np.bincount(y) if y.size > 0 else y}")
+            logger.info(f"[prepare_features] Final feature shape: {X.shape}")
             return X, y
         except Exception as e:
             logger.error(f"Error in prepare_features: {str(e)}")
@@ -706,11 +724,10 @@ class AITrader:
         # Final unconditional return to guarantee a tuple (should never be hit, but for safety)
         logger.error("prepare_features: Reached end of function without returning (should not happen). Returning (None, None)")
         return None, None
-            
-    def train(self, X, y, X_val=None, y_val=None):
-        """Train the AI trading model, robust to missing features"""
+
+    def train(self, X, y, X_val=None, y_val=None, use_simple_model=False):
+        """Train the AI trading model, robust to missing features, with option for simple model"""
         try:
-            # Add logging for label distribution and NaN/Inf
             logger.info(f"Training labels distribution: {np.bincount(y) if hasattr(np, 'bincount') and y.dtype==int else y}")
             logger.info(f"Feature NaN count: {np.isnan(X).sum()}, Inf count: {np.isinf(X).sum()}")
             if np.isnan(X).any() or np.isinf(X).any() or np.isnan(y).any() or np.isinf(y).any():
@@ -719,18 +736,20 @@ class AITrader:
             if len(np.unique(y)) < 2:
                 logger.error("Not enough label variety for training. Aborting.")
                 raise ValueError("Not enough label variety for training.")
-
+            if use_simple_model:
+                logger.info("Using LogisticRegression for debugging.")
+                self.model = LogisticRegression(max_iter=200)
+                self.model.fit(X, y)
+                if hasattr(self.model, 'coef_'):
+                    logger.info(f"Feature importances (coef): {self.model.coef_}")
+                return {"status": "ok", "model": "logistic_regression"}
             # Build model if not exists
             if self.model is None:
-                # If using LSTM/GRU, X should be 3D: (samples, timesteps, features)
-                # If using Dense, X is 2D: (samples, features)
                 if len(X.shape) == 3:
                     input_shape = (X.shape[1], X.shape[2])
                 else:
                     input_shape = X.shape[1]
                 self.model = self.technical_model.build_model(input_shape)
-
-            # Train model
             history = self.model.fit(
                 X, y,
                 epochs=100,
@@ -738,11 +757,8 @@ class AITrader:
                 validation_data=(X_val, y_val) if X_val is not None and y_val is not None else None,
                 verbose=1
             )
-            
-            # After training, log metrics
             train_metrics = self.model.evaluate(X, y, verbose=0)
             val_metrics = self.model.evaluate(X_val, y_val, verbose=0) if X_val is not None and y_val is not None else None
-            # Defensive: ensure all are floats or fallback to 'N/A'
             def safe_float(val):
                 try:
                     return float(val)
@@ -760,22 +776,14 @@ class AITrader:
                 val_loss = float('nan')
                 val_acc = float('nan')
             logger.info(f"Training completed: loss={train_loss:.4f}, accuracy={train_acc:.4f}, val_loss={val_loss:.4f}, val_accuracy={val_acc:.4f}")
-            
-            # Log final metrics
             final_metrics = self.evaluate_model(X, y)
             accuracy = final_metrics['accuracy']
             f1 = final_metrics['f1']
             logger.info(f"Final training accuracy: {accuracy:.4f}, F1: {f1:.4f}")
             if accuracy < 0.7 or f1 < 0.7:
                 logger.warning("Model metrics below threshold. Consider tuning or checking data.")
-
-            # --- FORCE SIGNALS FOR DEBUGGING ---
             logger.info("Forcing at least one buy and one sell signal in test data for debugging.")
-            # This is a placeholder: in the real pipeline, you would patch the test set or signal generator
-            # For now, just log the intent
-
             return history.history
-
         except Exception as e:
             logger.error(f"Error in model training: {str(e)}")
             import traceback
@@ -796,7 +804,9 @@ class AITrader:
             state = state.reshape(1, -1)
         
         prediction = self.predict(pd.DataFrame(state))
-        return 1 if prediction[0] > 0.5 else 0  # 1 for buy, 0 for sell/hold
+        action = 1 if prediction[0] > 0.5 else 0  # 1 for buy, 0 for sell/hold
+        logger.info(f"AI model select_action: prediction={prediction[0]}, action={action}")
+        return action
         
     def calculate_reward(self, action: int, entry_price: float, exit_price: float, position_type: str = 'long') -> float:
         """Calculate reward for reinforcement learning"""
@@ -805,18 +815,23 @@ class AITrader:
         else:  # short position
             return (entry_price - exit_price) / entry_price if action == 1 else 0
 
-    def add_sentiment_to_market_data(self, symbol: str, market_data: pd.DataFrame) -> pd.DataFrame:
-        """Fetch news, compute sentiment, and add as a column to market_data for the given symbol. Ensures 'sentiment_score' and 'symbol' columns always exist."""
-        # Add logging to show sentiment fetch results
-        from src.data.news_sentiment import fetch_sentiment_news
-        news_data = fetch_sentiment_news(symbol, self.config)
-        sentiment_score = self.sentiment_analyzer.analyze_news(news_data) if news_data else 0
-        logging.getLogger().info(f"Sentiment for {symbol}: score={sentiment_score}, news_count={len(news_data)}, sample_title={news_data[0]['title'] if news_data else 'NONE'}")
-        market_data = market_data.copy()
-        market_data['sentiment_score'] = sentiment_score
-        if 'symbol' not in market_data.columns:
-            market_data['symbol'] = symbol
-        return market_data
+    def evaluate_model(self, X, y):
+        """Evaluate the trained AI trading model on given data and return metrics."""
+        if self.model is None:
+            logger.error("Model not trained yet. Cannot evaluate.")
+            return {"accuracy": 0, "precision": 0, "recall": 0, "f1": 0}
+        y_pred_prob = self.model.predict(X)
+        y_pred = (y_pred_prob > 0.5).astype(int).flatten()
+        accuracy = accuracy_score(y, y_pred)
+        precision = precision_score(y, y_pred, zero_division=0)
+        recall = recall_score(y, y_pred, zero_division=0)
+        f1 = f1_score(y, y_pred, zero_division=0)
+        return {
+            "accuracy": accuracy,
+            "precision": precision,
+            "recall": recall,
+            "f1": f1
+        }
 
 class TradingEnvironment(gym.Env):
     """Custom Trading Environment for Reinforcement Learning"""

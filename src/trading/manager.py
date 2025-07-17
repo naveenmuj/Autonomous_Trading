@@ -45,14 +45,14 @@ class TradeManager:
         try:
             # Validate inputs
             if not all([symbol, action, quantity, price, stop_loss, target]):
+                logger.warning(f"Trade skipped: Missing parameters symbol={symbol}, action={action}, quantity={quantity}, price={price}, stop_loss={stop_loss}, target={target}")
                 raise ValueError("All trade parameters must be provided")
-                
             if action not in ['BUY', 'SELL']:
+                logger.warning(f"Trade skipped: Invalid action {action} for symbol {symbol}")
                 raise ValueError("Action must be either 'BUY' or 'SELL'")
-                
             if quantity <= 0:
+                logger.warning(f"Trade skipped: Zero or negative quantity for {symbol}")
                 raise ValueError("Quantity must be positive")
-                
             # Check risk management rules
             trade = {
                 'symbol': symbol,
@@ -65,19 +65,18 @@ class TradeManager:
                 'status': 'open',
                 'type': self.config['trading']['mode']
             }
-            
             is_valid, reason = self.risk_manager.validate_trade(trade, self.account_value)
             if not is_valid:
-                logger.warning(f"Trade rejected: {reason}")
+                logger.warning(f"Trade rejected by risk manager for {symbol}: {reason}")
                 return None
-                
             if self.config['trading']['mode'] == 'simulation':
+                logger.info(f"Simulating trade for {symbol}: {trade}")
                 return self._simulate_trade(symbol, action, quantity, price)
             else:
+                logger.info(f"Executing live trade for {symbol}: {trade}")
                 return self._execute_live_trade(trade)
-                
         except Exception as e:
-            logger.error(f"Error placing trade: {str(e)}")
+            logger.error(f"Error placing trade for {symbol}: {str(e)}")
             raise
 
     def _simulate_trade(self, symbol: str, action: str, quantity: int, price: float,
@@ -112,15 +111,14 @@ class TradeManager:
     def _execute_live_trade(self, trade: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a live trade"""
         try:
-            # Place the order
+            # Place the order using the new place_order logic
             order = self.place_order(
                 symbol=trade['symbol'],
                 order_type=trade['action'],
                 quantity=trade['quantity'],
                 price=trade['entry_price']
             )
-            
-            if order and order['status'] == 'COMPLETE':
+            if order and (order.get('status') == 'COMPLETE' or order.get('status') == True):
                 self._update_position(trade)
                 self.trade_history.append(trade)
                 logger.info(f"Live trade executed: {trade['symbol']} {trade['action']} {trade['quantity']}")
@@ -128,34 +126,31 @@ class TradeManager:
             else:
                 logger.error(f"Order placement failed: {order.get('message', 'Unknown error')}")
                 return None
-                
         except Exception as e:
             logger.error(f"Error executing live trade: {str(e)}")
             raise
 
     def calculate_position_size(self, capital: float, price: float) -> int:
-        """Calculate position size based on risk management rules."""
+        """Calculate position size based on risk management rules, with logging."""
         try:
             max_position_size = self.config['trading']['risk']['max_position_size']
             max_risk_amount = capital * max_position_size
-            
-            # Calculate quantity based on price and max risk
             quantity = int(max_risk_amount / price)
-            
+            logger.info(f"Position sizing for capital={capital}, price={price}: max_risk_amount={max_risk_amount}, quantity={quantity}")
+            if quantity <= 0:
+                logger.warning(f"Position sizing resulted in zero quantity for price={price}, capital={capital}")
             return max(1, quantity)  # Ensure at least 1 unit
-            
         except Exception as e:
             self.logger.error(f"Error calculating position size: {str(e)}")
             return 1
 
     def _update_position(self, trade: Dict[str, Any]):
-        """Update position based on trade."""
+        """Update position based on trade, with logging."""
         try:
             symbol = trade['symbol']
             action = trade['action']
             quantity = trade['quantity']
             price = trade['price']
-            
             if symbol not in self.positions:
                 self.positions[symbol] = {
                     'quantity': 0,
@@ -163,24 +158,23 @@ class TradeManager:
                     'stop_loss': trade.get('stop_loss'),
                     'profit_target': trade.get('profit_target')
                 }
-            
             position = self.positions[symbol]
-            
             if action == 'BUY':
                 new_quantity = position['quantity'] + quantity
                 new_cost = (position['quantity'] * position['avg_price']) + (quantity * price)
                 position['quantity'] = new_quantity
                 position['avg_price'] = new_cost / new_quantity
+                logger.info(f"Position updated (BUY) for {symbol}: {position}")
             else:  # SELL
                 if position['quantity'] < quantity:
+                    logger.warning(f"Trade skipped: Insufficient position to sell {quantity} of {symbol}. Current: {position['quantity']}")
                     raise ValueError(f"Insufficient position for {symbol}")
                 position['quantity'] -= quantity
                 if position['quantity'] == 0:
                     del self.positions[symbol]
-            
-            self.logger.info(f"Updated position for {symbol}: {self.positions[symbol]}")
+                logger.info(f"Position updated (SELL) for {symbol}: {position if symbol in self.positions else 'CLOSED'}")
         except Exception as e:
-            self.logger.error(f"Error updating position: {str(e)}")
+            self.logger.error(f"Error updating position for {symbol}: {str(e)}")
             raise
 
     def place_order(self, symbol: str, order_type: str, quantity: int, price: float = None) -> Dict[str, Any]:
@@ -198,10 +192,28 @@ class TradeManager:
                 }
                 return order
             else:
-                # Implement actual broker order placement here
-                # This is a placeholder for the actual implementation
-                raise NotImplementedError("Live trading not implemented")
-                
+                # Live trading: use DataCollector.place_broker_order
+                if not self.data_collector or not hasattr(self.data_collector, 'place_broker_order'):
+                    raise NotImplementedError("Live trading not available: DataCollector.place_broker_order missing.")
+                # Prepare order params as per Angel One API
+                # You may want to map symbol to tradingsymbol and symboltoken here
+                tradingsymbol = symbol.replace('.NS', '-EQ') if symbol.endswith('.NS') else symbol
+                symboltoken = self.data_collector.symbol_token_map.get(symbol) or self.data_collector.symbol_token_map.get(tradingsymbol)
+                if not symboltoken:
+                    raise ValueError(f"No symbol token found for {symbol}")
+                order_params = {
+                    "variety": "NORMAL",
+                    "tradingsymbol": tradingsymbol,
+                    "symboltoken": str(symboltoken),
+                    "transactiontype": order_type,
+                    "exchange": "NSE",
+                    "ordertype": "MARKET" if price is None else "LIMIT",
+                    "producttype": "DELIVERY",
+                    "price": 0 if price is None else float(price),
+                    "quantity": int(quantity)
+                }
+                response = self.data_collector.place_broker_order(order_params)
+                return response
         except Exception as e:
             logger.error(f"Error placing order: {str(e)}")
             raise
@@ -266,23 +278,29 @@ class TradeManager:
             wins = 0
             total_trades = len(self.trade_history)
             
+            # Use live broker data if available
+            if hasattr(self, 'sync_with_broker'):
+                self.sync_with_broker()
+            if hasattr(self, 'sync_orders_with_broker'):
+                self.sync_orders_with_broker()
+            
             # Calculate P&L for open positions
             for position in self.positions.values():
-                if position['status'] == 'open':
+                if position.get('status') == 'open':
                     current_price = self.data_collector.get_latest_price(position['symbol'])
                     if current_price:
-                        if position['action'] == 'BUY':
-                            pnl = (current_price - position['entry_price']) * position['quantity']
+                        if position.get('action', 'BUY') == 'BUY':
+                            pnl = (current_price - position['avg_price']) * position['quantity']
                         else:
-                            pnl = (position['entry_price'] - current_price) * position['quantity']
+                            pnl = (position['avg_price'] - current_price) * position['quantity']
                         total_value += pnl
             
             # Calculate metrics for closed trades
             for trade in self.trade_history:
-                if trade['status'] == 'closed':
-                    if trade['pnl'] > 0:
+                if trade.get('status') == 'closed':
+                    if trade.get('pnl', 0) > 0:
                         wins += 1
-                    daily_pnl += trade['pnl']
+                    daily_pnl += trade.get('pnl', 0)
             
             win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
             
@@ -433,23 +451,22 @@ class TradeManager:
             return 0.0
 
     def _get_angel_portfolio_balance(self) -> float:
-        """Get portfolio balance from Angel One API in live mode"""
+        """Get portfolio balance from Angel One API in live mode using robust DataCollector method."""
         try:
-            if not self.data_collector or not hasattr(self.data_collector, 'angel_api'):
-                logger.warning("Angel One API not initialized")
+            if not self.data_collector or not hasattr(self.data_collector, 'get_broker_balance'):
+                logger.warning("Angel One DataCollector.get_broker_balance not available")
                 return 0.0
-
-            response = self.data_collector.angel_api.portfolio()
-            if response and response.get('status') and response.get('data'):
-                portfolio_data = response['data']
-                # Get available balance + stocks value
-                available_balance = float(portfolio_data.get('availablecash', 0))
-                stocks_value = float(portfolio_data.get('net', 0))  # Net portfolio value
-                return available_balance + stocks_value
+            logger.info("Fetching broker balance using DataCollector.get_broker_balance()")
+            balance = self.data_collector.get_broker_balance()
+            logger.info(f"Fetched broker balance: {balance}")
+            if balance:
+                available_cash = float(balance.get('available_cash') or 0)
+                net = float(balance.get('net') or 0)
+                logger.info(f"Available Cash: {available_cash}, Net: {net}")
+                return net
             else:
-                logger.error(f"Failed to get portfolio data: {response}")
+                logger.error("No balance data returned from Angel One RMS endpoint.")
                 return 0.0
-
         except Exception as e:
             logger.error(f"Error getting Angel One portfolio balance: {str(e)}")
             return 0.0
@@ -500,3 +517,192 @@ class TradeManager:
         except Exception as e:
             logger.error(f"Error getting positions: {e}")
             return []
+
+    def place_order(self, symbol: str, signal: int, sentiment=None, reasoning=None):
+        """
+        Place an order with full risk management and explainability.
+        signal: 1=buy, -1=sell
+        """
+        try:
+            action = 'BUY' if signal == 1 else 'SELL'
+            price = self.data_collector.get_latest_price(symbol)
+            if not price:
+                logger.warning(f"No price available for {symbol}, skipping order.")
+                return None
+            # Position sizing
+            capital = self.account_value
+            quantity = self.calculate_position_size(capital, price)
+            # Stop-loss and target
+            stop_loss_pct = self.risk_manager.stop_loss
+            profit_target_pct = self.config.get('trading', {}).get('strategy', {}).get('profit_target', 0.03)
+            stop_loss = price * (1 - stop_loss_pct) if action == 'BUY' else price * (1 + stop_loss_pct)
+            target = price * (1 + profit_target_pct) if action == 'BUY' else price * (1 - profit_target_pct)
+            # Log reasoning for explainability
+            logger.info(f"Placing order: {symbol} | {action} | Qty: {quantity} | Price: {price} | SL: {stop_loss} | Target: {target} | Sentiment: {sentiment} | Reasoning: {reasoning}")
+            # Enforce risk checks
+            trade = {
+                'symbol': symbol,
+                'action': action,
+                'quantity': quantity,
+                'entry_price': price,
+                'stop_loss': stop_loss,
+                'target': target,
+                'timestamp': datetime.now(),
+                'status': 'open',
+                'type': self.config['trading']['mode'],
+                'sentiment': sentiment,
+                'reasoning': reasoning
+            }
+            is_valid, reason = self.risk_manager.validate_trade(trade, self.account_value)
+            if not is_valid:
+                logger.warning(f"Trade rejected: {reason}")
+                return None
+            # Simulate or execute trade
+            if self.config['trading']['mode'] == 'simulation':
+                return self._simulate_trade(symbol, action, quantity, price, stop_loss, target)
+            else:
+                return self._execute_live_trade(trade)
+        except Exception as e:
+            logger.error(f"Error placing order: {str(e)}")
+            return None
+
+    def sync_with_broker(self):
+        """
+        Fetch live holdings from Angel One and update self.positions using robust DataCollector.get_broker_portfolio().
+        """
+        try:
+            if not hasattr(self.data_collector, 'get_broker_portfolio'):
+                logger.error("DataCollector missing get_broker_portfolio method.")
+                return
+            broker_positions = self.data_collector.get_broker_portfolio()
+            if not broker_positions:
+                logger.warning("No holdings data returned from Angel One (getHolding). Portfolio may be empty or API error.")
+                return
+            self.update_positions_from_broker(broker_positions)
+            logger.info("Angel One portfolio sync complete.")
+        except Exception as e:
+            logger.error(f"Error in sync_with_broker: {e}")
+
+    def update_positions_from_broker(self, broker_positions):
+        """
+        Update self.positions from Angel One holdings data.
+        broker_positions: list of dicts from Angel One API.
+        """
+        try:
+            self.positions.clear()
+            for pos in broker_positions:
+                symbol = pos.get('tradingsymbol') or pos.get('symbol')
+                qty = pos.get('quantity') or pos.get('qty')
+                avg_price = pos.get('averageprice') or pos.get('avg_price')
+                if symbol and qty:
+                    self.positions[symbol] = {
+                        'quantity': qty,
+                        'avg_price': avg_price,
+                        'stop_loss': None,
+                        'profit_target': None,
+                        'status': 'open',
+                        'from_broker': True
+                    }
+            logger.info(f"Updated positions from broker: {list(self.positions.keys())}")
+        except Exception as e:
+            logger.error(f"Error updating positions from broker: {e}")
+
+    def sync_orders_with_broker(self):
+        """
+        Fetch live orders from Angel One and update self.trade_history.
+        """
+        try:
+            api_key = self.config.get('angel_one', {}).get('api_key')
+            client_id = self.config.get('angel_one', {}).get('client_id')
+            password = self.config.get('angel_one', {}).get('password')
+            totp_secret = self.config.get('angel_one', {}).get('totp_secret')
+            if not all([api_key, client_id, password, totp_secret]):
+                logger.warning("Angel One API credentials missing in config. Cannot sync orders.")
+                return
+            smart_api = SmartConnect(api_key)
+            try:
+                smart_api.generateSession(client_id, password, smart_api.get_totp(totp_secret))
+            except Exception as e:
+                logger.error(f"Angel One login failed: {e}")
+                return
+            try:
+                orders = smart_api.orderBook()
+                if not orders or 'data' not in orders or not orders['data']:
+                    logger.info("Angel One API returned no order data (empty order book or API response).")
+                    return
+                self.update_orders_from_broker(orders['data'])
+                logger.info("Angel One order sync complete.")
+            except Exception as e:
+                logger.error(f"Error fetching orders from Angel One: {e}")
+        except Exception as e:
+            logger.error(f"Error in sync_orders_with_broker: {e}")
+
+    def update_orders_from_broker(self, broker_orders):
+        """
+        Update self.trade_history from Angel One order data.
+        broker_orders: list of dicts from Angel One API.
+        """
+        try:
+            self.trade_history.clear()
+            for order in broker_orders:
+                symbol = order.get('tradingsymbol') or order.get('symbol')
+                qty = order.get('quantity') or order.get('qty')
+                price = order.get('averageprice') or order.get('price')
+                status = order.get('status')
+                action = order.get('transactiontype') or order.get('action')
+                if symbol and qty:
+                    self.trade_history.append({
+                        'symbol': symbol,
+                        'action': action,
+                        'quantity': qty,
+                        'price': price,
+                        'status': status,
+                        'order_id': order.get('orderid'),
+                        'timestamp': order.get('orderentrytime')
+                    })
+            logger.info(f"Updated trade history from broker: {len(self.trade_history)} orders")
+        except Exception as e:
+            logger.error(f"Error updating orders from broker: {e}")
+
+    def get_portfolio_metrics(self) -> Dict[str, float]:
+        """
+        Calculate portfolio metrics, using live broker data if available.
+        """
+        try:
+            total_value = self.account_value
+            open_positions = len(self.positions)
+            daily_pnl = 0
+            wins = 0
+            total_trades = len(self.trade_history)
+            # Use live broker data if available
+            if hasattr(self, 'sync_with_broker'):
+                self.sync_with_broker()
+            if hasattr(self, 'sync_orders_with_broker'):
+                self.sync_orders_with_broker()
+            # Calculate P&L for open positions
+            for position in self.positions.values():
+                if position.get('status') == 'open':
+                    current_price = self.data_collector.get_latest_price(position['symbol'])
+                    if current_price:
+                        if position.get('action', 'BUY') == 'BUY':
+                            pnl = (current_price - position['avg_price']) * position['quantity']
+                        else:
+                            pnl = (position['avg_price'] - current_price) * position['quantity']
+                        total_value += pnl
+            # Calculate metrics for closed trades
+            for trade in self.trade_history:
+                if trade.get('status') == 'closed':
+                    if trade.get('pnl', 0) > 0:
+                        wins += 1
+                    daily_pnl += trade.get('pnl', 0)
+            win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
+            return {
+                'total_value': total_value,
+                'open_positions': open_positions,
+                'daily_pnl': daily_pnl,
+                'win_rate': win_rate,
+                'daily_return': (daily_pnl / total_value * 100) if total_value > 0 else 0
+            }
+        except Exception as e:
+            logger.error(f"Error calculating portfolio metrics: {str(e)}")
+            raise

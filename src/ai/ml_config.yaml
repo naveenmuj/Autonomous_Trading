@@ -1,0 +1,57 @@
+# Machine Learning Config for State-of-the-Art Swing Trading System
+
+supervised:
+  enabled: true
+  model_type: "xgboost" # Options: xgboost, random_forest, lstm, transformer
+  features:
+  - close
+  - volume
+  - rsi
+  - macd
+  - bb_upper
+  - bb_lower
+  # - sentiment_score  # DISABLED: news sentiment
+  target: "direction" # up/down/neutral
+  train_test_split: 0.8
+  hyperparameter_tuning: true
+  save_model: true
+
+unsupervised:
+  enabled: true
+  clustering:
+    method: "kmeans"
+    n_clusters: 5
+  regime_detection:
+    method: "pca"
+    n_components: 3
+  autoencoder:
+    enabled: false
+
+reinforcement_learning:
+  enabled: true
+  library: "stable_baselines3" # Options: stable_baselines3, finrl, ray
+  algo: "PPO" # Options: PPO, DQN, A2C, SAC
+  reward_function: "sharpe_ratio"
+  state_features:
+  - technical_signals
+  # - sentiment_score  # DISABLED: news sentiment
+  - regime_label
+  action_space: [ buy, hold, sell ]
+  train_steps: 100000
+  save_model: true
+
+nlp:
+  enabled: true
+  sentiment_model: "finbert" # Options: finbert, vader, custom_llm
+  news_source: "none" # DISABLED: newsapi/news sentiment
+  use_llm_for_reasoning: true
+
+integration:
+  use_supervised_signals_in_rl: true
+  use_nlp_features_in_rl: true
+  use_unsupervised_regimes_in_rl: true
+
+logging:
+  level: "INFO"
+  log_to_file: true
+  log_file: "models/ml_pipeline.log"

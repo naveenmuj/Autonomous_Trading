@@ -61,6 +61,8 @@ protobuf==3.20.3
 ijson
 feedparser
 apscheduler
+google
+concurrent-log-handler
 
 # Python 3.9.23
 

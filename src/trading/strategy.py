@@ -59,7 +59,11 @@ class EnhancedTradingStrategy:
     def generate_signals(self, data: pd.DataFrame) -> pd.DataFrame:
         """Generate trading signals based on technical analysis and AI predictions"""
         try:
+            if 'symbol' not in data.columns:
+                logger.error("Input data for generate_signals is missing 'symbol' column. Returning empty signals.")
+                return pd.DataFrame(index=data.index)
             signals = pd.DataFrame(index=data.index)
+            primary_symbol = data['symbol'].iloc[0] if not data['symbol'].empty else None
             for symbol in data['symbol'].unique():
                 symbol_data = data[data['symbol'] == symbol].copy()
                 # Technical Analysis Signals
@@ -72,17 +76,17 @@ class EnhancedTradingStrategy:
                     technical_signals=signals[f'{symbol}_technical'] if f'{symbol}_technical' in signals.columns else None,
                     ai_signals=signals[f'{symbol}_ai'] if f'{symbol}_ai' in signals.columns else None
                 )
-            # --- FORCE SIGNALS FOR DEBUGGING ---
-            if 'signal' not in signals.columns or signals['signal'].sum() == 0:
-                logger.warning("All signals are zero or missing. Forcing at least one buy/sell for debugging.")
-                if len(signals) > 10:
-                    signals['signal'] = 0
-                    signals.iloc[5, signals.columns.get_loc('signal')] = 1
-                    signals.iloc[10, signals.columns.get_loc('signal')] = -1
-                else:
-                    signals['signal'] = 0
-                    signals.iloc[0, signals.columns.get_loc('signal')] = 1
-            logger.info(f"Signal distribution after forcing: {signals['signal'].value_counts().to_dict()}")
+            # Set main 'signal' column for the primary symbol
+            if primary_symbol and f'{primary_symbol}_final' in signals.columns:
+                signals['signal'] = signals[f'{primary_symbol}_final']
+            else:
+                logger.warning("No final signal column found for primary symbol. All signals set to 0.")
+                signals['signal'] = 0
+            # Log signal distribution
+            logger.info(f"Signal distribution: {signals['signal'].value_counts().to_dict()}")
+            # If all signals are zero, log and halt (no forced debug signals)
+            if signals['signal'].abs().sum() == 0:
+                logger.error("All signals are zero. No trades will be executed. Check indicator thresholds and data quality.")
             return signals
         except Exception as e:
             logger.error(f"Error generating signals: {str(e)}")
@@ -95,32 +99,34 @@ class EnhancedTradingStrategy:
             if 'rsi' in data.columns:
                 oversold = self.strategy_config.get('indicators', {}).get('rsi', {}).get('oversold', 30)
                 overbought = self.strategy_config.get('indicators', {}).get('rsi', {}).get('overbought', 70)
-                
-                signals[f'{symbol}_rsi'] = np.where(
+                rsi_signal = np.where(
                     data['rsi'] < oversold, 1,  # Oversold - Buy
                     np.where(data['rsi'] > overbought, -1, 0)  # Overbought - Sell
                 )
-            
+                signals[f'{symbol}_rsi'] = pd.Series(rsi_signal, index=data.index).reindex(signals.index)
             # MACD Signals
             if all(x in data.columns for x in ['macd', 'macd_signal']):
-                signals[f'{symbol}_macd'] = np.where(
+                macd_signal = np.where(
                     data['macd'] > data['macd_signal'], 1, -1
                 )
-            
+                signals[f'{symbol}_macd'] = pd.Series(macd_signal, index=data.index).reindex(signals.index)
             # Bollinger Bands Signals
             if all(x in data.columns for x in ['bb_upper', 'bb_middle', 'bb_lower']):
-                signals[f'{symbol}_bb'] = np.where(
+                bb_signal = np.where(
                     data['close'] < data['bb_lower'], 1,  # Price below lower band - Buy
                     np.where(data['close'] > data['bb_upper'], -1, 0)  # Price above upper band - Sell
                 )
-            
-            # Combined Technical Signal
-            tech_columns = [col for col in signals.columns if col.startswith(f'{symbol}_') and col != f'{symbol}_technical']
+                signals[f'{symbol}_bb'] = pd.Series(bb_signal, index=data.index).reindex(signals.index)
+            # Combined Technical Signal (majority vote, not mean)
+            tech_columns = [col for col in signals.columns if col.startswith(f'{symbol}_') and col not in [f'{symbol}_technical', f'{symbol}_ai', f'{symbol}_final']]
             if tech_columns:
-                signals[f'{symbol}_technical'] = signals[tech_columns].mean(axis=1)
-            
+                tech_signals = signals[tech_columns].reindex(signals.index).fillna(0)
+                # Majority vote: if sum > 0, buy; < 0, sell; else hold
+                tech_sum = tech_signals.sum(axis=1)
+                tech_majority = tech_sum.apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
+                signals[f'{symbol}_technical'] = tech_majority
+                logger.info(f"{symbol} technical signals (majority): {tech_majority.value_counts().to_dict()}")
             return signals
-            
         except Exception as e:
             logger.error(f"Error generating technical signals: {str(e)}")
             raise
@@ -129,33 +135,38 @@ class EnhancedTradingStrategy:
         try:
             if symbol not in self.models:
                 logger.warning(f"No model found for symbol {symbol}")
+                signals[f'{symbol}_ai'] = pd.Series(0, index=data.index).reindex(signals.index)
                 return signals
-                
             tf = get_tf()
             if tf is None:
                 logger.warning("TensorFlow not available. Skipping AI predictions.")
+                signals[f'{symbol}_ai'] = pd.Series(0, index=data.index).reindex(signals.index)
                 return signals
-                
             model = self.models[symbol]
             features = self._prepare_features(data)
-            
-            # Check if the model is a TensorFlow model
+            # Check if the model is a TensorFlow model and trained
             if hasattr(model, 'predict'):
-                predictions = model.predict(features)
+                # Check for a 'trained' attribute or similar, or try/except predict
+                try:
+                    predictions = model.predict(features)
+                except Exception as e:
+                    logger.error(f"Model for {symbol} is not trained or failed to predict: {e}")
+                    signals[f'{symbol}_ai'] = pd.Series(0, index=data.index).reindex(signals.index)
+                    return signals
                 threshold = self.strategy_config.get('confidence_threshold', 0.6)
-                
-                signals[f'{symbol}_ai'] = np.where(
+                ai_signal = np.where(
                     predictions > threshold, 1,
                     np.where(predictions < -threshold, -1, 0)
                 )
+                signals[f'{symbol}_ai'] = pd.Series(ai_signal.flatten(), index=data.index).reindex(signals.index)
+                logger.info(f"{symbol} AI predictions: {predictions[-5:].flatten()} | AI signals: {signals[f'{symbol}_ai'].iloc[-5:].values}")
             else:
                 logger.warning(f"Model for {symbol} is not a valid TensorFlow model")
-            
+                signals[f'{symbol}_ai'] = pd.Series(0, index=data.index).reindex(signals.index)
             return signals
-            
         except Exception as e:
             logger.error(f"Error generating AI signals: {str(e)}")
-            # Return signals without AI predictions in case of error
+            signals[f'{symbol}_ai'] = pd.Series(0, index=data.index).reindex(signals.index)
             return signals
 
     def _combine_signals(self, technical_signals: Optional[pd.Series] = None, 
@@ -165,41 +176,27 @@ class EnhancedTradingStrategy:
             weights = self.strategy_config.get('signal_weights', {})
             tech_weight = weights.get('technical', 0.5)
             ai_weight = weights.get('ai', 0.5)
-            
             # Initialize with neutral signal
             if technical_signals is None and ai_signals is None:
                 return pd.Series(0, index=technical_signals.index if technical_signals is not None else ai_signals.index)
-            
             # Normalize weights
             total_weight = (tech_weight if technical_signals is not None else 0) + \
                          (ai_weight if ai_signals is not None else 0)
-                         
             if total_weight == 0:
                 return pd.Series(0, index=technical_signals.index if technical_signals is not None else ai_signals.index)
-                
             tech_weight = tech_weight / total_weight if technical_signals is not None else 0
             ai_weight = ai_weight / total_weight if ai_signals is not None else 0
-            
             # Combine signals
-            combined = pd.Series(0, index=technical_signals.index if technical_signals is not None else ai_signals.index)
-            
+            base_index = technical_signals.index if technical_signals is not None else ai_signals.index
+            combined = pd.Series(0, index=base_index)
             if technical_signals is not None:
-                combined += technical_signals * tech_weight
-            
+                combined = combined.add(technical_signals.reindex(base_index).fillna(0) * tech_weight, fill_value=0)
             if ai_signals is not None:
-                combined += ai_signals * ai_weight
-            
-            # Apply thresholds for final signal
-            threshold = self.strategy_config.get('signal_threshold', 0.5)
-            return pd.Series(np.where(
-                combined > threshold, 1,
-                np.where(combined < -threshold, -1, 0)
-            ), index=combined.index)
-                
+                combined = combined.add(ai_signals.reindex(base_index).fillna(0) * ai_weight, fill_value=0)
+            return combined
         except Exception as e:
             logger.error(f"Error combining signals: {str(e)}")
-            # Return neutral signal in case of error
-            return pd.Series(0, index=technical_signals.index if technical_signals is not None else ai_signals.index)
+            raise
 
     def _prepare_features(self, data: pd.DataFrame) -> np.ndarray:
         """Prepare features for AI model prediction with fallback calculations"""
@@ -212,7 +209,7 @@ class EnhancedTradingStrategy:
                 'bb_upper': lambda df: ta.volatility.BollingerBands(df['close']).bollinger_hband(),
                 'bb_middle': lambda df: ta.volatility.BollingerBands(df['close']).bollinger_mavg(),
                 'bb_lower': lambda df: ta.volatility.BollingerBands(df['close']).bollinger_lband(),
-                'volume_sma': lambda df: ta.volume.volume_sma_indicator(df['volume'])
+                'volume_sma': lambda df: df['volume'].rolling(window=20, min_periods=1).mean()  # 20-period SMA
             }
             
             # Get configured features or use defaults
