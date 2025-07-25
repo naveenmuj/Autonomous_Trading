@@ -43,16 +43,16 @@ automation:
   retraining:
     enabled: true
     frequency: daily
-    last_trained: '2025-06-27T17:52:59.001952'
+    last_trained: '2025-07-21T17:23:41.996479'
   scheduler:
     enabled: true
-    time: "21:35" # 24-hour format, IST (e.g., 02:00 for 2 AM IST)
+    time: '21:35'
 data:
   fallback_stocks:
   - RELIANCE.NS
   - TCS.NS
   - HDFCBANK.NS
-  historical_days: 365
+  historical_days: 730
   indicators:
   - RSI
   - MACD
@@ -67,7 +67,7 @@ data:
     auto_reconnect: true
     correlation_id: stream_{timestamp}
     exchange: NSE
-    mode: 2
+    mode: 3
     retry:
       initial_delay: 3
       max_attempts: 3
@@ -91,7 +91,6 @@ model:
         - 128
         vf:
         - 128
-
         - 128
       ortho_init: true
   env:
@@ -224,22 +223,22 @@ trading:
     manual_symbols:
     - RELIANCE.NS
     - TCS.NS
-    # - HDFCBANK.NS
-    # - INFY.NS
-    # - ICICIBANK.NS
+    - HDFCBANK.NS
+    - INFY.NS
     mode: manual
   default_quantity: 1
   max_positions: 5
-  mode: live # PATCH: Set to simulation for backtesting
+  mode: simulation
+  initial_account_value: 100000
   paper_trading_days: 30
   risk:
-    position_size: 0.05 # PATCH: Allow larger position size for more trades
+    position_size: 0.05
     risk_per_trade: 0.02
     stop_loss: 0.02
   risk_percentage: 2
   rules:
-    min_confidence: 0.5 # PATCH: Lowered for more signals
-    profit_target: 0.02 # PATCH: Lowered for more exits
+    min_confidence: 0.5
+    profit_target: 0.02
     stop_loss: 0.02
     trailing_stop: true
   strategy:
@@ -340,6 +339,7 @@ trading:
     manual_list:
     - RELIANCE.NS
     - TCS.NS
-    # - HDFCBANK.NS  
+    - HDFCBANK.NS
+    - INFY.NS
     mode: manual
     top_n_stocks: 50

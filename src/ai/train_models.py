@@ -73,10 +73,12 @@ class ModelTrainer:
                 logger.warning("No symbols discovered, using defaults")
                 symbols = ['RELIANCE.NS', 'TCS.NS', 'INFY.NS']
             logger.info(f"Collecting data for symbols: {symbols}")
-            # Collect historical data with pattern and indicators
+            # Use historical_days from config
+            days = self.config.get('data', {}).get('historical_days', 120)
+            logger.info(f"[PATCH] Using days={days} from config for historical data fetch.")
             all_data = []
             for sym in symbols:
-                df = self.data_collector.get_historical_data(sym, days=120)
+                df = self.data_collector.get_historical_data(sym, days=days)
                 # Verification log: check required columns
                 required_cols = ['open', 'high', 'low', 'close', 'volume']
                 missing_cols = [col for col in required_cols if col not in df.columns]
@@ -113,65 +115,17 @@ class ModelTrainer:
         except Exception as e:
             logger.error(f"Error in collect_training_data: {e}")
             return pd.DataFrame()
-            start_date = end_date - timedelta(days=365)  # 1 year of data
-            
-            all_data = []
-            for symbol in symbols:
-                try:
-                    df = self.data_collector.get_historical_data(
-                        symbol=symbol,
-                        days=365
-                    )
-                    
-                    # Add 1 second delay to avoid API rate limit
-                    time.sleep(1)
-                    
-                    if not df.empty:
-                        # Add technical indicators
-                        df = self.tech_model.calculate_indicators(df)
-                        
-                        # Add trend line analysis
-                        trend_lines = self.tech_analyzer.detect_trend_lines(df)
-                        breakouts = self.tech_analyzer.analyze_breakouts(df, trend_lines)
-                        
-                        # Store analysis results
-                        df['trend_strength'] = self.strategy._calculate_trend_strength(df)
-                        df['breakout_strength'] = self.strategy._calculate_breakout_strength(df)
-                        
-                        all_data.append(df)
-                        logger.info(f"Collected and processed {len(df)} records for {symbol}")
-                    else:
-                        logger.warning(f"No data available for {symbol}")
-                
-                except Exception as e:
-                    logger.error(f"Error processing {symbol}: {str(e)}")
-            
-            if not all_data:
-                raise ValueError("No data collected for training")
-            
-            # Combine all data
-            combined_data = pd.concat(all_data)
-            logger.info(f"Total training records: {len(combined_data)}")
-            
-            # Ensure 'pattern' column is present before saving to CSV
-            if 'pattern' not in combined_data.columns:
-                logger.warning("'pattern' column missing before saving to CSV. Adding default value for all rows.")
-                combined_data['pattern'] = 'None'
-            # Save to standard file for SOTA pipeline
-            combined_data.to_csv(self.sota_data_path, index=False)
-            logger.info(f"[AUTOMATION] SOTA training data prepared and saved to {self.sota_data_path}")
-            
-            return combined_data
-            
-        except Exception as e:
-            logger.error(f"Error collecting training data: {str(e)}")
-            raise
 
     def train_models(self, data: pd.DataFrame) -> Dict[str, float]:
         """Train all models with collected data"""
         try:
             logger.info("Starting model training")
             metrics = {}
+
+            if data is None or data.empty:
+                logger.error("No valid data available for model training. Skipping all model training.")
+                metrics['status'] = 'skipped_all'
+                return metrics
 
             # Ensure 'pattern' column is present in data
             if 'pattern' not in data.columns:
@@ -192,35 +146,47 @@ class ModelTrainer:
                     logger.warning(f"'pattern' column missing in {split_name}_data. Adding default value.")
                     split_df['pattern'] = 'None'
 
+            # --- PATCH: Skip training if prepare_data returns None ---
+            skipped = []
             # Train Technical Analysis Model
             logger.info("Training Technical Analysis Model...")
             X_train, y_train = self.tech_model.prepare_data(train_data)
             X_val, y_val = self.tech_model.prepare_data(val_data)
-            # --- FIX: Always match model type to data shape ---
-            if len(X_train.shape) == 3:
-                self.tech_model.build_model(X_train.shape[1:], model_type='lstm')
+            if X_train is None or y_train is None or len(X_train) == 0 or len(y_train) == 0:
+                logger.error("Technical Analysis Model: No valid training data after preprocessing. Skipping model training for this symbol.")
+                skipped.append('TechnicalAnalysisModel')
             else:
-                self.tech_model.build_model(X_train.shape[1], model_type='dense')
-            history = self.tech_model.train_model(
-                X_train, y_train,
-                validation_data=(X_val, y_val),
-                epochs=self.config.get('model', {}).get('training', {}).get('epochs', 100),
-                batch_size=32
-            )
-            
-            # Evaluate on test set
-            X_test, y_test = self.tech_model.prepare_data(test_data)
-            test_metrics = self.tech_model.evaluate_model(X_test, y_test)
-            
-            metrics.update({
-                'tech_model_accuracy': test_metrics['accuracy'],
-                'tech_model_precision': test_metrics['precision'],
-                'tech_model_recall': test_metrics['recall'],
-                'tech_model_f1': test_metrics['f1']
-            })
-            
-            logger.info(f"Technical Model Metrics: {test_metrics}")
-            
+                # --- FIX: Always match model type to data shape ---
+                if len(X_train.shape) == 3:
+                    self.tech_model.build_model(X_train.shape[1:], model_type='lstm')
+                else:
+                    self.tech_model.build_model(X_train.shape[1], model_type='dense')
+                history = self.tech_model.train_model(
+                    X_train, y_train,
+                    validation_data=(X_val, y_val),
+                    epochs=self.config.get('model', {}).get('training', {}).get('epochs', 100),
+                    batch_size=32
+                )
+                # Evaluate on test set
+                X_test, y_test = self.tech_model.prepare_data(test_data)
+                if X_test is None or y_test is None or len(X_test) == 0 or len(y_test) == 0:
+                    logger.error("Technical Analysis Model: No valid test data after preprocessing. Skipping evaluation for this symbol.")
+                    skipped.append('TechnicalAnalysisModel_test')
+                else:
+                    test_metrics = self.tech_model.evaluate_model(X_test, y_test)
+                    metrics.update({
+                        'tech_model_accuracy': test_metrics['accuracy'],
+                        'tech_model_precision': test_metrics['precision'],
+                        'tech_model_recall': test_metrics['recall'],
+                        'tech_model_f1': test_metrics['f1']
+                    })
+
+            if skipped:
+                logger.warning(f"Model training skipped for: {skipped}. See earlier logs for reasons.")
+
+            if 'tech_model_accuracy' in metrics:
+                logger.info(f"Technical Model Metrics: {metrics}")
+
             # Train AI Trader
             logger.info("Training AI Trader Model...")
             X_ai, y_ai = self.ai_trader.prepare_features(train_data)
@@ -240,41 +206,42 @@ class ModelTrainer:
 
             # Backtest strategy
             logger.info("Running backtest...")
-            backtest_results = self.backtester.run(test_data)
-            
-            metrics.update({
-                'backtest_return': backtest_results['total_return'],
-                'backtest_sharpe': backtest_results['sharpe_ratio'],
-                'backtest_max_drawdown': backtest_results['max_drawdown'],
-                'backtest_win_rate': backtest_results['win_rate']
-            })
-            
-            logger.info(f"Backtest Results: {backtest_results}")
-            
-            # Save models
-            self.save_models()
+            if test_data is None or test_data.empty:
+                logger.warning("No test data available for backtest. Skipping backtest.")
+            else:
+                backtest_results = self.backtester.run(test_data)
+                metrics.update({
+                    'backtest_return': backtest_results['total_return'],
+                    'backtest_sharpe': backtest_results['sharpe_ratio'],
+                    'backtest_max_drawdown': backtest_results['max_drawdown'],
+                    'backtest_win_rate': backtest_results['win_rate']
+                })
+                logger.info(f"Backtest Results: {backtest_results}")
+
+            # Save models if any model was trained
+            if not skipped:
+                self.save_models()
 
             # --- Robo trading readiness check ---
             min_acc = self.config.get('model', {}).get('min_accuracy', 0.7)
             min_f1 = self.config.get('model', {}).get('min_f1', 0.7)
             min_win = self.config.get('model', {}).get('min_win_rate', 0.55)
             ready = True
-            if metrics['tech_model_accuracy'] < min_acc:
-                logger.warning(f"Model accuracy {metrics['tech_model_accuracy']:.2f} below threshold {min_acc}")
+            if metrics.get('tech_model_accuracy', 0) < min_acc:
+                logger.warning(f"Model accuracy {metrics.get('tech_model_accuracy', 0):.2f} below threshold {min_acc}")
                 ready = False
-            if metrics['tech_model_f1'] < min_f1:
-                logger.warning(f"Model F1 {metrics['tech_model_f1']:.2f} below threshold {min_f1}")
+            if metrics.get('tech_model_f1', 0) < min_f1:
+                logger.warning(f"Model F1 {metrics.get('tech_model_f1', 0):.2f} below threshold {min_f1}")
                 ready = False
-            if metrics['backtest_win_rate'] < min_win:
-                logger.warning(f"Backtest win rate {metrics['backtest_win_rate']:.2f} below threshold {min_win}")
+            if metrics.get('backtest_win_rate', 0) < min_win:
+                logger.warning(f"Backtest win rate {metrics.get('backtest_win_rate', 0):.2f} below threshold {min_win}")
                 ready = False
-            if ready:
+            if ready and metrics:
                 logger.info("MODEL IS READY FOR ROBO TRADING: All metrics above thresholds.")
-            else:
+            elif metrics:
                 logger.error("MODEL IS NOT READY FOR ROBO TRADING: One or more metrics below threshold. Live trading will be blocked.")
             metrics['robo_trading_ready'] = ready
             return metrics
-            
         except Exception as e:
             logger.error(f"Error training models: {str(e)}")
             raise

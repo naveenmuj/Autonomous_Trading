@@ -65,6 +65,15 @@ class DashboardUI:
         self.autonomous_trader = None
         self.autonomous_thread = None
         
+        # Initialize WebSocket connection for live data
+        if self.data_collector and hasattr(self.data_collector, 'ensure_websocket_connected'):
+            logger.info("Initializing WebSocket connection for live price data...")
+            try:
+                self.data_collector.ensure_websocket_connected()
+                logger.info("WebSocket connection initialized successfully")
+            except Exception as e:
+                logger.warning(f"Failed to initialize WebSocket connection: {e}")
+        
         logger.info("DashboardUI initialized")
         print("=== DashboardUI.__init__() complete ===")
     
@@ -106,45 +115,113 @@ class DashboardUI:
         return trading_config.get('symbols', ['RELIANCE.NS', 'TCS.NS', 'HDFCBANK.NS', 'INFY.NS', 'ICICIBANK.NS'])
 
     def _fetch_and_display_live_prices(self, symbols: List[str] = None):
-        """Fetch and display live prices for symbols, using DataCollector.get_live_quote for correct backend logic."""
+        """Fetch and display live prices for symbols, with proper market status handling."""
         try:
+            logger.info(f"[DEBUG] _fetch_and_display_live_prices called")
+            
             if not self.data_collector:
+                st.error("[DEBUG] self.data_collector is None!")
                 return
+                
+            if not hasattr(self.data_collector, 'get_live_quote'):
+                st.error("[DEBUG] get_live_quote method not found on data_collector!")
+                return
+            
             if symbols is None:
                 symbols = self._get_symbols()
+            
+            # Check current market status
+            current_time = datetime.now()
+            market_open_time = current_time.replace(hour=9, minute=15, second=0, microsecond=0)
+            market_close_time = current_time.replace(hour=15, minute=30, second=0, microsecond=0)
+            is_market_open = market_open_time <= current_time <= market_close_time
+            
+            # Display market status
+            if is_market_open:
+                st.success("🟢 Market is OPEN - Live prices streaming")
+            else:
+                st.info("🔴 Market is CLOSED - Showing Last Traded Prices (LTP)")
+            
             cols = st.columns(len(symbols))
             for i, symbol in enumerate(symbols):
                 with cols[i]:
-                    price_data = None
-                    last_update = None
-                    # --- Use DataCollector.get_live_quote for correct backend logic ---
-                    if hasattr(self.data_collector, 'get_live_quote'):
+                    try:
+                        # Always try to get the latest available price data
+                        logger.info(f"[DEBUG] Calling get_live_quote for {symbol}")
                         price_data = self.data_collector.get_live_quote(symbol)
-                        if price_data and 'ltp' in price_data:
-                            last_update = price_data.get('timestamp', datetime.now())
-                            self.market_data_cache.update(symbol, price_data)
-                    if not price_data:
-                        st.metric("Price", "₹ --")
-                        st.caption("Waiting for real-time data from WebSocket...")
-                        continue
-                    st.subheader(symbol.replace('.NS', ''))
-                    price = float(price_data['ltp'])
-                    change = float(price_data.get('change', 0))
-                    change_pct = float(price_data.get('change_percent', 0))
-                    change_text = f"{change:+.2f} ({change_pct:+.2f}%)"
-                    st.metric(
-                        "Price",
-                        f"₹{price:,.2f}",
-                        delta=change_text
-                    )
-                    if last_update:
-                        time_diff = datetime.now() - last_update if isinstance(last_update, datetime) else 0
-                        st.caption(f"Updated {time_diff.seconds if hasattr(time_diff, 'seconds') else 0}s ago (WebSocket)")
-                    else:
-                        st.caption("Source: WebSocket")
+                        logger.info(f"[DEBUG] get_live_quote({symbol}) returned: {price_data}")
+                        
+                        if price_data and 'ltp' in price_data and price_data['ltp'] > 0:
+                            st.subheader(symbol.replace('.NS', ''))
+                            price = float(price_data['ltp'])
+                            change = float(price_data.get('change', 0))
+                            change_pct = float(price_data.get('change_percent', 0))
+                            
+                            # Determine price color based on change
+                            if change > 0:
+                                delta_color = "normal"  # Green for positive
+                            elif change < 0:
+                                delta_color = "inverse"  # Red for negative
+                            else:
+                                delta_color = "off"  # No color for no change
+                            
+                            # Format change text
+                            if change != 0:
+                                change_text = f"{change:+.2f} ({change_pct:+.2f}%)"
+                            else:
+                                change_text = "No change"
+                            
+                            st.metric(
+                                "Price",
+                                f"₹{price:,.2f}",
+                                delta=change_text if change != 0 else None,
+                                delta_color=delta_color
+                            )
+                            
+                            # Show data source and timestamp
+                            data_source = price_data.get('source', 'Unknown')
+                            timestamp = price_data.get('timestamp')
+                            
+                            if is_market_open:
+                                if data_source == 'websocket':
+                                    st.caption("📡 Live WebSocket data")
+                                elif data_source == 'api':
+                                    st.caption("🔄 Live API data")
+                                else:
+                                    st.caption("📊 Live data")
+                            else:
+                                if data_source == 'websocket':
+                                    st.caption("💾 Cached WebSocket LTP")
+                                elif data_source == 'api':
+                                    st.caption("💾 Historical API LTP")
+                                elif data_source == 'csv':
+                                    st.caption("📁 CSV Fallback LTP")
+                                else:
+                                    st.caption("📈 Last Traded Price")
+                            
+                            # Show last update time if available
+                            if timestamp:
+                                if isinstance(timestamp, datetime):
+                                    time_str = timestamp.strftime('%H:%M:%S')
+                                    st.caption(f"⏰ Last updated: {time_str}")
+                        
+                        else:
+                            # No price data available
+                            st.subheader(symbol.replace('.NS', ''))
+                            st.metric("Price", "₹ --")
+                            if is_market_open:
+                                st.caption("⚠️ Waiting for live data...")
+                            else:
+                                st.caption("⚠️ No LTP data available")
+                            
+                    except Exception as symbol_error:
+                        st.subheader(symbol.replace('.NS', ''))
+                        st.error(f"Error loading {symbol}: {str(symbol_error)}")
+                        logger.error(f"Error processing {symbol}: {symbol_error}")
+                        
         except Exception as e:
-            logger.error(f"Error displaying live prices: {str(e)}")
-            st.error("Error updating prices. Check logs for details.")
+            logger.error(f"Error in _fetch_and_display_live_prices: {str(e)}", exc_info=True)
+            st.error(f"Error updating prices: {str(e)}")
 
     def render_trading_tab(self):
         import streamlit as st
@@ -153,6 +230,37 @@ class DashboardUI:
             st.header("Trading Dashboard")
             all_symbols = self._get_symbols()
             st.info(f"[DEBUG] all_symbols: {all_symbols}")
+            
+            # TEMP: Direct test of get_live_quote method
+            if self.data_collector and hasattr(self.data_collector, 'get_live_quote'):
+                st.info("[DEBUG] Testing get_live_quote method directly...")
+                test_symbol = 'RELIANCE.NS'
+                try:
+                    test_result = self.data_collector.get_live_quote(test_symbol)
+                    st.info(f"[DEBUG] get_live_quote('{test_symbol}') returned: {test_result}")
+                    st.info(f"[DEBUG] Result type: {type(test_result)}")
+                    if test_result:
+                        st.info(f"[DEBUG] Result keys: {list(test_result.keys()) if isinstance(test_result, dict) else 'Not a dict'}")
+                except Exception as e:
+                    st.error(f"[DEBUG] get_live_quote failed with error: {e}")
+                    import traceback
+                    st.text(traceback.format_exc())
+            
+            # DEBUG: Show recent logs
+            with st.expander("Debug Logs", expanded=False):
+                try:
+                    import logging
+                    # Check if we have the StreamlitLogHandler
+                    streamlit_handlers = [h for h in logging.getLogger().handlers if hasattr(h, 'log_messages')]
+                    if streamlit_handlers:
+                        recent_logs = streamlit_handlers[0].log_messages[-20:]  # Show last 20 messages
+                        for log_msg in recent_logs:
+                            st.text(log_msg)
+                    else:
+                        st.text("No debug handler found")
+                except Exception as e:
+                    st.text(f"Error showing logs: {e}")
+            
             # --- Searchable multi-select for all stocks ---
             monitored_symbols = st.multiselect(
                 "Select stocks to monitor (star to add/remove)",
@@ -160,9 +268,11 @@ class DashboardUI:
                 default=all_symbols[:5],
                 help="Search and select stocks to monitor live. All stocks are available for training."
             )
+            st.info(f"[DEBUG] monitored_symbols: {monitored_symbols}")
             if not monitored_symbols:
                 st.info("No stocks selected for monitoring. Use the search box above to add.")
             else:
+                st.info(f"[DEBUG] About to call _fetch_and_display_live_prices with {monitored_symbols}")
                 self._fetch_and_display_live_prices(monitored_symbols)
 
             # Trading mode: always live

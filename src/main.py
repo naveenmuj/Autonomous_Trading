@@ -37,7 +37,29 @@ from ai.training_pipeline import TrainingPipeline
 from trading.strategy import EnhancedTradingStrategy
 from ui.dashboard import DashboardUI
 from ai.models import AITrader, TechnicalAnalysisModel, SentimentAnalyzer
-from tensorflow.keras.models import load_model
+
+# TensorFlow will be loaded lazily to avoid Streamlit conflicts
+TF_AVAILABLE = False
+load_model = None
+
+def initialize_tensorflow():
+    """Lazy load TensorFlow after Streamlit is fully initialized"""
+    global TF_AVAILABLE, load_model
+    try:
+        from tensorflow.keras.models import load_model as tf_load_model
+        load_model = tf_load_model
+        TF_AVAILABLE = True
+        print("[INFO] TensorFlow loaded successfully (lazy loading)")
+        return True
+    except ImportError as e:
+        print(f"[WARNING] TensorFlow not available: {e}")
+        TF_AVAILABLE = False
+        def dummy_load_model(*args, **kwargs):
+            print("[INFO] Dummy load_model called (TensorFlow unavailable)")
+            return None
+        load_model = dummy_load_model
+        return False
+
 import torch
 from apscheduler.schedulers.background import BackgroundScheduler
 import subprocess
@@ -46,20 +68,50 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from pytz import timezone
-from concurrent_log_handler import ConcurrentRotatingFileHandler
+
+# Make concurrent_log_handler optional
+try:
+    from concurrent_log_handler import ConcurrentRotatingFileHandler
+    CONCURRENT_LOG_AVAILABLE = True
+except ImportError:
+    from logging.handlers import RotatingFileHandler as ConcurrentRotatingFileHandler
+    CONCURRENT_LOG_AVAILABLE = False
+    print("[WARNING] concurrent_log_handler not available, using standard RotatingFileHandler")
 
 # Remove any existing handlers from the root logger
 for handler in logging.root.handlers[:]:
     logging.root.removeHandler(handler)
 
-# Configure logging with a single handler
+# Configure logging with both console and Streamlit visibility
+import streamlit as st
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - [%(name)s] - [%(levelname)s] - %(message)s',
     handlers=[
-        logging.StreamHandler()  # Console handler
-    ]
+        logging.StreamHandler(sys.stdout)  # Explicit stdout for Streamlit
+    ],
+    force=True  # Force reconfiguration
 )
+
+# Also add a custom handler for Streamlit
+class StreamlitLogHandler(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.log_messages = []
+    
+    def emit(self, record):
+        msg = self.format(record)
+        self.log_messages.append(msg)
+        # Keep only last 100 messages
+        if len(self.log_messages) > 100:
+            self.log_messages = self.log_messages[-100:]
+        print(f"[STREAMLIT LOG] {msg}")
+
+# Add the Streamlit handler
+streamlit_handler = StreamlitLogHandler()
+streamlit_handler.setLevel(logging.INFO)
+logging.getLogger().addHandler(streamlit_handler)
 
 # Project paths setup
 project_root = str(Path(__file__).parent.parent.absolute())
@@ -149,13 +201,19 @@ data_logger = logging.getLogger('data')
 # Suppress warnings
 warnings.filterwarnings('ignore')
 
-# Log system info at startup
-logger.info("=== System Information ===")
-logger.info(f"Python version: {sys.version}")
-logger.info(f"CPU cores: {psutil.cpu_count()}")
-logger.info(f"Memory available: {psutil.virtual_memory().available / (1024*1024*1024):.1f}GB")
-logger.info(f"Disk space available: {psutil.disk_usage('/').free / (1024*1024*1024):.1f}GB")
-logger.info("=== System Check Complete ===")
+def log_system_info():
+    """Log system information once during initialization"""
+    logger.info("=== System Information ===")
+    logger.info(f"Python version: {sys.version}")
+    logger.info(f"CPU cores: {psutil.cpu_count()}")
+    logger.info(f"Memory available: {psutil.virtual_memory().available / (1024*1024*1024):.1f}GB")
+    try:
+        # Use Windows drive path instead of Unix '/'
+        disk_usage = psutil.disk_usage('C:\\')
+        logger.info(f"Disk space available: {disk_usage.free / (1024*1024*1024):.1f}GB")
+    except Exception as e:
+        logger.warning(f"Could not get disk usage: {e}")
+    logger.info("=== System Check Complete ===")
 
 def load_config():
     """Load configuration file (cached by Streamlit)"""
@@ -178,6 +236,42 @@ def load_config():
         
         if missing_sections:
             raise ValueError(f"Missing required config sections: {missing_sections}")
+            
+        # Validate critical API configuration
+        api_config = config.get('api', {}) or config.get('apis', {})
+        angel_one_config = api_config.get('angel_one', {})
+        
+        required_angel_one_fields = ['api_key', 'client_id', 'mpin', 'totp_secret']
+        missing_angel_fields = [field for field in required_angel_one_fields 
+                               if not angel_one_config.get(field)]
+        
+        if missing_angel_fields:
+            raise ValueError(f"Missing required Angel One API fields: {missing_angel_fields}")
+            
+        # Validate API key format (basic checks)
+        api_key = angel_one_config.get('api_key', '')
+        if api_key and len(api_key) < 6:
+            raise ValueError("Angel One API key appears invalid (too short)")
+            
+        # Validate TOTP secret format
+        totp_secret = angel_one_config.get('totp_secret', '')
+        if totp_secret and len(totp_secret) < 16:
+            raise ValueError("TOTP secret appears invalid (too short)")
+        
+        # Validate client_id format  
+        client_id = angel_one_config.get('client_id', '')
+        if client_id and len(client_id) < 8:
+            raise ValueError("Angel One client_id appears invalid (too short)")
+        
+        # Validate trading configuration
+        trading_config = config.get('trading', {})
+        if 'risk_management' in trading_config:
+            risk_config = trading_config['risk_management']
+            max_position_size = risk_config.get('max_position_size_percent')
+            if max_position_size is not None and (max_position_size <= 0 or max_position_size > 100):
+                raise ValueError(f"Invalid max_position_size_percent: {max_position_size}. Must be between 0 and 100")
+                
+        logger.info("Configuration validation passed")
             
         # Normalize config to use expected keys
         if 'apis' in config and 'api' not in config:
@@ -259,20 +353,62 @@ def initialize_components(config):
     logger.info("=== ENTER initialize_components() ===")
     print("=== ENTER initialize_components() ===")
     try:
-        collector = DataCollector(config)
-        logger.info("Step 1: DataCollector initialized")
+        # Show progress for each step
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        status_text.text("🔧 Initializing Data Collector...")
+        progress_bar.progress(10)
+        try:
+            logger.info("About to create DataCollector instance...")
+            collector = DataCollector(config)
+            logger.info("DataCollector instance created successfully")
+            
+            # Initialize websocket connection for live prices
+            logger.info("Initializing websocket connection for live price data...")
+            try:
+                collector.ensure_websocket_connected()
+                logger.info("WebSocket connection initialized")
+            except Exception as ws_e:
+                logger.warning(f"WebSocket initialization failed: {ws_e}")
+            
+            logger.info("Step 1: DataCollector initialized")
+        except Exception as e:
+            logger.error(f"Error creating DataCollector: {e}")
+            logger.exception("Full exception details:")
+            raise
+        
+        # WebSocket is already initialized in DataCollector constructor
+        status_text.text("🌐 Live data stream already connected...")
+        progress_bar.progress(25)
+        logger.info("Step 1.1: WebSocket already initialized in DataCollector")
+            
+        status_text.text("💼 Initializing Trade Manager...")
+        progress_bar.progress(40)
         trade_manager = TradeManager(config, collector)
         logger.info("Step 2: TradeManager initialized")
+        
+        status_text.text("📈 Loading Technical Analysis Models...")
+        progress_bar.progress(60)
         technical_analyzer = TechnicalAnalysisModel(config)
         logger.info("Step 3: TechnicalAnalysisModel initialized")
+        
+        status_text.text("🤖 Initializing AI Models...")
+        progress_bar.progress(75)
         ai_model = AITrader(config)
         logger.info("Step 4: AITrader initialized")
+        
+        status_text.text("🧠 Loading Pre-trained Models...")
+        progress_bar.progress(85)
         pretrained_models = load_pretrained_models(config)
         logger.info("Step 5: Pre-trained models loaded")
         if hasattr(ai_model, 'set_loaded_models'):
             ai_model.set_loaded_models(pretrained_models)
         if hasattr(technical_analyzer, 'set_loaded_models'):
             technical_analyzer.set_loaded_models(pretrained_models)
+            
+        status_text.text("🎨 Initializing Dashboard UI...")
+        progress_bar.progress(95)
         logger.info("Step 6: Initializing DashboardUI...")
         print("=== initialize_components(): Instantiating DashboardUI ===")
         dashboard = DashboardUI(
@@ -282,9 +418,19 @@ def initialize_components(config):
             technical_analyzer=technical_analyzer,
             ai_model=ai_model
         )
+        
+        status_text.text("✅ All components initialized!")
+        progress_bar.progress(100)
         logger.info("All components initialized successfully")
         print("=== EXIT initialize_components() ===")
         logger.info("=== EXIT initialize_components() ===")
+        
+        # Clear the progress indicators
+        import time
+        time.sleep(1)
+        progress_bar.empty()
+        status_text.empty()
+        
         return dashboard
     except Exception as e:
         logger.error(f"Error initializing components: {str(e)}", exc_info=True)
@@ -398,6 +544,11 @@ def run_training_pipeline():
 def main():
     print("=== ENTER main() ===")
     logging.info("=== ENTER main() ===")
+    
+    # Initialize TensorFlow lazily after Streamlit is ready
+    print("Initializing TensorFlow...")
+    initialize_tensorflow()
+    
     try:
         config = load_config()
         print("=== main(): load_config() returned ===")
@@ -416,8 +567,40 @@ def main():
         print(traceback.format_exc())
         return
 
-# Call main() at top level for Streamlit compatibility
-main()
+# Initialize components using Streamlit session state for persistence
+if 'dashboard' not in st.session_state:
+    print("=== Initializing dashboard in session state ===")
+    logger.info("=== Initializing dashboard in session state ===")
+    
+    # Log system information once
+    log_system_info()
+    
+    # Show loading indicator
+    with st.spinner("🚀 Initializing AI Trading System..."):
+        st.info("📊 Loading configuration...")
+        try:
+            config = load_config()
+            print("=== Session state init: load_config() returned ===")
+            logger.info("=== Session state init: load_config() returned ===")
+            
+            st.info("🔌 Connecting to market data sources...")
+            dashboard = initialize_components(config)
+            if dashboard is not None:
+                st.session_state.dashboard = dashboard
+                print("=== Dashboard stored in session state ===")
+                logger.info("=== Dashboard stored in session state ===")
+                st.success("✅ AI Trading System initialized successfully!")
+            else:
+                st.error("❌ Dashboard failed to initialize. Check logs for details.")
+                st.stop()
+        except Exception as e:
+            logger.exception("Exception during initialization: %s", e)
+            st.error(f"❌ Exception during initialization: {e}")
+            st.stop()
+
+# Render the dashboard
+if 'dashboard' in st.session_state:
+    st.session_state.dashboard.render()
 
 # NOTE: Model training is NOT performed at startup. Run ai/train.py or ai/training_pipeline.py separately to retrain models.
 # Reload models by restarting the app or by implementing a reload mechanism if needed.

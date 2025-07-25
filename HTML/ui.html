@@ -1,0 +1,1802 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AutoTrade Pro - Advanced Trading Platform</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+        
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        
+        .gradient-bg {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+        
+        .card-shadow {
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+        }
+        
+        .profit-green {
+            color: #10b981;
+        }
+        
+        .loss-red {
+            color: #ef4444;
+        }
+        
+        .pulse-animation {
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        .stock-row:hover {
+            background-color: #f8fafc;
+            transform: translateY(-1px);
+            transition: all 0.2s ease;
+        }
+        
+        .toggle-switch {
+            position: relative;
+            display: inline-block;
+            width: 60px;
+            height: 34px;
+        }
+        
+        .toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: .4s;
+            border-radius: 34px;
+        }
+        
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 26px;
+            width: 26px;
+            left: 4px;
+            bottom: 4px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+        
+        input:checked + .slider {
+            background-color: #10b981;
+        }
+        
+        input:checked + .slider:before {
+            transform: translateX(26px);
+        }
+        
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.5);
+        }
+        
+        .modal-content {
+            background-color: white;
+            margin: 5% auto;
+            padding: 20px;
+            border-radius: 10px;
+            width: 90%;
+            max-width: 800px;
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+        
+        .close {
+            color: #aaa;
+            float: right;
+            font-size: 28px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+        
+        .close:hover {
+            color: black;
+        }
+        
+        .tab-active {
+            background-color: #3b82f6;
+            color: white;
+        }
+        
+        .tab-inactive {
+            background-color: #f3f4f6;
+            color: #6b7280;
+        }
+        
+        .view-section {
+            display: none;
+        }
+        
+        .view-section.active {
+            display: block;
+        }
+        
+        .chart-controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        
+        .chart-btn {
+            padding: 8px 16px;
+            border: 1px solid #d1d5db;
+            background: white;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.2s;
+        }
+        
+        .chart-btn:hover {
+            background: #f3f4f6;
+        }
+        
+        .chart-btn.active {
+            background: #3b82f6;
+            color: white;
+            border-color: #3b82f6;
+        }
+        
+        .notification {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: white;
+            border-left: 4px solid #10b981;
+            padding: 16px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            z-index: 1001;
+            transform: translateX(400px);
+            transition: transform 0.3s ease;
+        }
+        
+        .notification.show {
+            transform: translateX(0);
+        }
+        
+        .candlestick-container {
+            position: relative;
+            height: 400px;
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+        }
+    </style>
+</head>
+<body class="bg-gray-50">
+    <!-- Notification -->
+    <div id="notification" class="notification">
+        <div class="flex items-center">
+            <div class="w-6 h-6 bg-green-100 rounded-full flex items-center justify-center mr-3">
+                <span class="text-green-600 text-sm">✓</span>
+            </div>
+            <div>
+                <p class="font-medium text-gray-900" id="notificationTitle">Trade Executed</p>
+                <p class="text-sm text-gray-600" id="notificationMessage">TCS position opened successfully</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="flex h-screen">
+        <!-- Sidebar -->
+        <div class="w-64 bg-white shadow-lg">
+            <div class="p-6 gradient-bg">
+                <h1 class="text-white text-xl font-bold">AutoTrade Pro</h1>
+                <p class="text-white text-sm opacity-90">Advanced Trading Platform</p>
+            </div>
+            
+            <nav class="mt-6">
+                <div class="px-6 py-3 bg-blue-50 border-r-4 border-blue-500">
+                    <div class="flex items-center">
+                        <span class="text-blue-600 font-medium">📊 Dashboard</span>
+                    </div>
+                </div>
+                
+                <div class="px-6 py-4">
+                    <h3 class="text-gray-500 text-xs font-semibold uppercase tracking-wider mb-3">Trading Metrics</h3>
+                    
+                    <div class="space-y-4">
+                        <div class="flex justify-between items-center">
+                            <span class="text-sm text-gray-600">Trade Accuracy</span>
+                            <span class="text-sm font-semibold profit-green">87.3%</span>
+                        </div>
+                        
+                        <div class="flex justify-between items-center">
+                            <span class="text-sm text-gray-600">Trade Executions</span>
+                            <span class="text-sm font-semibold text-gray-900">1,247</span>
+                        </div>
+                        
+                        <div class="flex justify-between items-center">
+                            <span class="text-sm text-gray-600">Active Trades</span>
+                            <span class="text-sm font-semibold text-blue-600">12</span>
+                        </div>
+                        
+                        <div class="flex justify-between items-center">
+                            <span class="text-sm text-gray-600">Win Rate</span>
+                            <span class="text-sm font-semibold profit-green">73.2%</span>
+                        </div>
+                        
+                        <div class="flex justify-between items-center">
+                            <span class="text-sm text-gray-600">Avg. Hold Time</span>
+                            <span class="text-sm font-semibold text-gray-900">2.4h</span>
+                        </div>
+                        
+                        <div class="flex justify-between items-center">
+                            <span class="text-sm text-gray-600">Risk Score</span>
+                            <span class="text-sm font-semibold text-orange-500">Medium</span>
+                        </div>
+                        
+                        <div class="flex justify-between items-center">
+                            <span class="text-sm text-gray-600">Sharpe Ratio</span>
+                            <span class="text-sm font-semibold profit-green">1.85</span>
+                        </div>
+                        
+                        <div class="flex justify-between items-center">
+                            <span class="text-sm text-gray-600">Max Drawdown</span>
+                            <span class="text-sm font-semibold loss-red">-8.2%</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="px-6 py-4 border-t">
+                    <h3 class="text-gray-500 text-xs font-semibold uppercase tracking-wider mb-3">Quick Actions</h3>
+                    <div class="space-y-2">
+                        <button class="w-full text-left px-3 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded" onclick="openModal('portfolioModal')">📈 Portfolio Details</button>
+                        <button class="w-full text-left px-3 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded" onclick="openModal('settingsModal')">⚙️ Trading Settings</button>
+                        <button class="w-full text-left px-3 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded" onclick="openModal('analyticsModal')">📊 Advanced Analytics</button>
+                        <button class="w-full text-left px-3 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded" onclick="openModal('alertsModal')">🔔 Alert Center</button>
+                        <button class="w-full text-left px-3 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded" onclick="openModal('backtestModal')">🔄 Backtest Results</button>
+                    </div>
+                </div>
+            </nav>
+        </div>
+        
+        <!-- Main Content -->
+        <div class="flex-1 overflow-auto">
+            <!-- Top Navigation -->
+            <div class="bg-white border-b border-gray-200 px-6 py-4">
+                <div class="flex justify-between items-center">
+                    <div class="flex space-x-1">
+                        <button class="px-4 py-2 rounded-lg font-medium tab-active" onclick="switchView('home', this)">🏠 Home</button>
+                        <button class="px-4 py-2 rounded-lg font-medium tab-inactive" onclick="switchView('charts', this)">📈 Chart View</button>
+                        <button class="px-4 py-2 rounded-lg font-medium tab-inactive" onclick="switchView('portfolio', this)">💼 Portfolio</button>
+                        <button class="px-4 py-2 rounded-lg font-medium tab-inactive" onclick="switchView('orders', this)">📋 Orders</button>
+                        <button class="px-4 py-2 rounded-lg font-medium tab-inactive" onclick="switchView('analytics', this)">📊 Analytics</button>
+                        <button class="px-4 py-2 rounded-lg font-medium tab-inactive" onclick="switchView('alerts', this)">🔔 Alerts</button>
+                        <button class="px-4 py-2 rounded-lg font-medium tab-inactive" onclick="switchView('screener', this)">🔍 Screener</button>
+                        <button class="px-4 py-2 rounded-lg font-medium tab-inactive" onclick="switchView('news', this)">📰 News</button>
+                    </div>
+                    <div class="flex items-center space-x-4">
+                        <div class="flex items-center space-x-2">
+                            <span class="text-sm text-gray-600">Stop Loss Alerts</span>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="stopLossToggle" checked>
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+                        <div class="flex items-center space-x-2">
+                            <div class="w-3 h-3 bg-green-500 rounded-full pulse-animation"></div>
+                            <span class="text-sm text-gray-600">Live Trading</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="p-6">
+                <!-- Home View -->
+                <div id="homeView" class="view-section active">
+                    <!-- Header -->
+                    <div class="flex justify-between items-center mb-6">
+                        <div>
+                            <h2 class="text-2xl font-bold text-gray-900">Trading Dashboard</h2>
+                            <p class="text-gray-600">Real-time autonomous trading overview</p>
+                        </div>
+                    </div>
+                    
+                    <!-- Balance Cards -->
+                    <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-6">
+                        <div class="bg-white p-6 rounded-lg card-shadow cursor-pointer hover:shadow-lg transition-shadow" onclick="openModal('balanceModal')">
+                            <div class="flex items-center justify-between">
+                                <div>
+                                    <p class="text-sm text-gray-600">Current Balance</p>
+                                    <p class="text-2xl font-bold text-gray-900">₹2,45,680</p>
+                                </div>
+                                <div class="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center">
+                                    💰
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="bg-white p-6 rounded-lg card-shadow cursor-pointer hover:shadow-lg transition-shadow" onclick="openModal('plModal')">
+                            <div class="flex items-center justify-between">
+                                <div>
+                                    <p class="text-sm text-gray-600">Today's P&L</p>
+                                    <p class="text-2xl font-bold profit-green">+₹8,420</p>
+                                    <p class="text-xs profit-green">+3.55%</p>
+                                </div>
+                                <div class="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center">
+                                    📈
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="bg-white p-6 rounded-lg card-shadow">
+                            <div class="flex items-center justify-between">
+                                <div>
+                                    <p class="text-sm text-gray-600">Total Invested</p>
+                                    <p class="text-2xl font-bold text-gray-900">₹1,85,000</p>
+                                </div>
+                                <div class="w-12 h-12 bg-purple-100 rounded-full flex items-center justify-center">
+                                    💼
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="bg-white p-6 rounded-lg card-shadow">
+                            <div class="flex items-center justify-between">
+                                <div>
+                                    <p class="text-sm text-gray-600">Available Cash</p>
+                                    <p class="text-2xl font-bold text-gray-900">₹60,680</p>
+                                </div>
+                                <div class="w-12 h-12 bg-yellow-100 rounded-full flex items-center justify-center">
+                                    💳
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Live Trading Stocks -->
+                    <div class="bg-white rounded-lg card-shadow mb-6">
+                        <div class="p-6 border-b">
+                            <div class="flex justify-between items-center">
+                                <h3 class="text-lg font-semibold text-gray-900">Live Trading Positions</h3>
+                                <div class="flex space-x-2">
+                                    <button class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors" onclick="refreshPrices()">
+                                        Refresh Prices
+                                    </button>
+                                    <button class="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors" onclick="openModal('newTradeModal')">
+                                        + New Trade
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="overflow-x-auto">
+                            <table class="w-full">
+                                <thead class="bg-gray-50">
+                                    <tr>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Stock</th>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Qty</th>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Avg Price</th>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">LTP</th>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Change</th>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">P&L</th>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="bg-white divide-y divide-gray-200" id="stockTableBody">
+                                    <!-- Stock rows will be populated by JavaScript -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                    
+                    <!-- Trading Controls -->
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div class="bg-white p-6 rounded-lg card-shadow">
+                            <h3 class="text-lg font-semibold text-gray-900 mb-4">Trading Controls</h3>
+                            <div class="space-y-4">
+                                <div class="flex justify-between items-center">
+                                    <span class="text-sm text-gray-600">Auto Trading</span>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" checked>
+                                        <span class="slider"></span>
+                                    </label>
+                                </div>
+                                <div class="flex justify-between items-center">
+                                    <span class="text-sm text-gray-600">Risk Management</span>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" checked>
+                                        <span class="slider"></span>
+                                    </label>
+                                </div>
+                                <div class="flex justify-between items-center">
+                                    <span class="text-sm text-gray-600">Paper Trading</span>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox">
+                                        <span class="slider"></span>
+                                    </label>
+                                </div>
+                                <div class="flex justify-between items-center">
+                                    <span class="text-sm text-gray-600">AI Recommendations</span>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" checked>
+                                        <span class="slider"></span>
+                                    </label>
+                                </div>
+                            </div>
+                            
+                            <div class="mt-6 pt-4 border-t">
+                                <button class="w-full bg-red-600 text-white py-2 px-4 rounded-lg hover:bg-red-700 transition-colors" onclick="emergencyStop()">
+                                    Emergency Stop All Trades
+                                </button>
+                            </div>
+                        </div>
+                        
+                        <div class="bg-white p-6 rounded-lg card-shadow">
+                            <h3 class="text-lg font-semibold text-gray-900 mb-4">Recent Activity</h3>
+                            <div class="space-y-3" id="activityFeed">
+                                <!-- Activity items will be populated by JavaScript -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Chart View -->
+                <div id="chartsView" class="view-section">
+                    <div class="bg-white rounded-lg card-shadow p-6 mb-6">
+                        <div class="flex justify-between items-center mb-4">
+                            <h3 class="text-lg font-semibold text-gray-900">Advanced Chart Analysis</h3>
+                            <select id="stockSelector" class="px-4 py-2 border border-gray-300 rounded-lg">
+                                <option value="TCS">TCS</option>
+                                <option value="RELIANCE">RELIANCE</option>
+                                <option value="INFY">INFY</option>
+                                <option value="HDFCBANK">HDFCBANK</option>
+                            </select>
+                        </div>
+                        
+                        <div class="chart-controls">
+                            <button class="chart-btn active" onclick="setTimeframe('1D', this)">1D</button>
+                            <button class="chart-btn" onclick="setTimeframe('1W', this)">1W</button>
+                            <button class="chart-btn" onclick="setTimeframe('1M', this)">1M</button>
+                            <button class="chart-btn" onclick="setTimeframe('3M', this)">3M</button>
+                            <button class="chart-btn" onclick="setTimeframe('1Y', this)">1Y</button>
+                            <div class="border-l border-gray-300 mx-2"></div>
+                            <button class="chart-btn active" onclick="setChartType('candlestick', this)">Candlestick</button>
+                            <button class="chart-btn" onclick="setChartType('line', this)">Line</button>
+                            <button class="chart-btn" onclick="setChartType('area', this)">Area</button>
+                            <div class="border-l border-gray-300 mx-2"></div>
+                            <button class="chart-btn" onclick="toggleIndicator('sma')">SMA</button>
+                            <button class="chart-btn" onclick="toggleIndicator('ema')">EMA</button>
+                            <button class="chart-btn" onclick="toggleIndicator('rsi')">RSI</button>
+                            <button class="chart-btn" onclick="toggleIndicator('macd')">MACD</button>
+                            <button class="chart-btn" onclick="toggleIndicator('bollinger')">Bollinger Bands</button>
+                        </div>
+                        
+                        <div class="candlestick-container">
+                            <canvas id="candlestickChart"></canvas>
+                        </div>
+                    </div>
+                    
+                    <div class="bg-white p-6 rounded-lg card-shadow mb-6">
+                        <h4 class="font-semibold text-gray-900 mb-4">Top 5 Swing Performers Today</h4>
+                        <div style="height: 300px;">
+                            <canvas id="topPerformersChart"></canvas>
+                        </div>
+                    </div>
+                    
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                        <div class="bg-white p-6 rounded-lg card-shadow">
+                            <h4 class="font-semibold text-gray-900 mb-3">Technical Indicators</h4>
+                            <div class="space-y-2 text-sm">
+                                <div class="flex justify-between">
+                                    <span>RSI (14):</span>
+                                    <span class="font-medium">67.8</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span>MACD:</span>
+                                    <span class="font-medium profit-green">+12.5</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span>SMA (20):</span>
+                                    <span class="font-medium">₹3,245</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span>EMA (12):</span>
+                                    <span class="font-medium">₹3,267</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span>Volume:</span>
+                                    <span class="font-medium">2.4M</span>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="bg-white p-6 rounded-lg card-shadow">
+                            <h4 class="font-semibold text-gray-900 mb-3">Support & Resistance</h4>
+                            <div class="space-y-2 text-sm">
+                                <div class="flex justify-between">
+                                    <span>Resistance 1:</span>
+                                    <span class="font-medium loss-red">₹3,320</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span>Resistance 2:</span>
+                                    <span class="font-medium loss-red">₹3,380</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span>Support 1:</span>
+                                    <span class="font-medium profit-green">₹3,200</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span>Support 2:</span>
+                                    <span class="font-medium profit-green">₹3,150</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span>Pivot Point:</span>
+                                    <span class="font-medium">₹3,260</span>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="bg-white p-6 rounded-lg card-shadow">
+                            <h4 class="font-semibold text-gray-900 mb-3">AI Analysis</h4>
+                            <div class="space-y-3">
+                                <div class="p-3 bg-green-50 rounded-lg">
+                                    <p class="text-sm font-medium profit-green">Bullish Signal</p>
+                                    <p class="text-xs text-gray-600">Strong upward momentum detected</p>
+                                </div>
+                                <div class="p-3 bg-blue-50 rounded-lg">
+                                    <p class="text-sm font-medium text-blue-600">Pattern: Cup & Handle</p>
+                                    <p class="text-xs text-gray-600">Breakout probability: 78%</p>
+                                </div>
+                                <div class="p-3 bg-yellow-50 rounded-lg">
+                                    <p class="text-sm font-medium text-yellow-600">Volume Alert</p>
+                                    <p class="text-xs text-gray-600">Above average volume</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Other views (Portfolio, Orders, Analytics, Alerts) -->
+                <div id="portfolioView" class="view-section">
+                    <div class="bg-white rounded-lg card-shadow p-6">
+                        <h3 class="text-lg font-semibold text-gray-900 mb-4">Portfolio Overview</h3>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <div>
+                                <canvas id="portfolioChart" width="400" height="300"></canvas>
+                            </div>
+                            <div class="space-y-4">
+                                <div class="p-4 bg-gray-50 rounded-lg">
+                                    <h4 class="font-medium text-gray-900">Asset Allocation</h4>
+                                    <div class="mt-2 space-y-2">
+                                        <div class="flex justify-between text-sm">
+                                            <span>Equity:</span>
+                                            <span class="font-medium">75.3%</span>
+                                        </div>
+                                        <div class="flex justify-between text-sm">
+                                            <span>Cash:</span>
+                                            <span class="font-medium">24.7%</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="p-4 bg-gray-50 rounded-lg">
+                                    <h4 class="font-medium text-gray-900">Performance Metrics</h4>
+                                    <div class="mt-2 space-y-2">
+                                        <div class="flex justify-between text-sm">
+                                            <span>Total Return:</span>
+                                            <span class="font-medium profit-green">+32.8%</span>
+                                        </div>
+                                        <div class="flex justify-between text-sm">
+                                            <span>Annualized Return:</span>
+                                            <span class="font-medium profit-green">+18.5%</span>
+                                        </div>
+                                        <div class="flex justify-between text-sm">
+                                            <span>Volatility:</span>
+                                            <span class="font-medium">12.4%</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="ordersView" class="view-section">
+                    <div class="bg-white rounded-lg card-shadow">
+                        <div class="p-6 border-b">
+                            <h3 class="text-lg font-semibold text-gray-900">Order History</h3>
+                        </div>
+                        <div class="overflow-x-auto">
+                            <table class="w-full">
+                                <thead class="bg-gray-50">
+                                    <tr>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Time</th>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Stock</th>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Qty</th>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Price</th>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-gray-200">
+                                    <tr>
+                                        <td class="px-6 py-4 text-sm text-gray-900">10:30 AM</td>
+                                        <td class="px-6 py-4 text-sm font-medium text-gray-900">TCS</td>
+                                        <td class="px-6 py-4 text-sm text-green-600">BUY</td>
+                                        <td class="px-6 py-4 text-sm text-gray-900">50</td>
+                                        <td class="px-6 py-4 text-sm text-gray-900">₹3,245.60</td>
+                                        <td class="px-6 py-4"><span class="px-2 py-1 text-xs bg-green-100 text-green-800 rounded">Executed</span></td>
+                                    </tr>
+                                    <tr>
+                                        <td class="px-6 py-4 text-sm text-gray-900">09:45 AM</td>
+                                        <td class="px-6 py-4 text-sm font-medium text-gray-900">RELIANCE</td>
+                                        <td class="px-6 py-4 text-sm text-green-600">BUY</td>
+                                        <td class="px-6 py-4 text-sm text-gray-900">25</td>
+                                        <td class="px-6 py-4 text-sm text-gray-900">₹2,456.80</td>
+                                        <td class="px-6 py-4"><span class="px-2 py-1 text-xs bg-green-100 text-green-800 rounded">Executed</span></td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="analyticsView" class="view-section">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div class="bg-white p-6 rounded-lg card-shadow">
+                            <h4 class="font-semibold text-gray-900 mb-4">Performance Analytics</h4>
+                            <canvas id="performanceChart" width="400" height="300"></canvas>
+                        </div>
+                        <div class="bg-white p-6 rounded-lg card-shadow">
+                            <h4 class="font-semibold text-gray-900 mb-4">Risk Metrics</h4>
+                            <div class="space-y-4">
+                                <div class="flex justify-between items-center p-3 bg-gray-50 rounded">
+                                    <span class="text-sm text-gray-600">Value at Risk (VaR)</span>
+                                    <span class="font-medium loss-red">₹12,450</span>
+                                </div>
+                                <div class="flex justify-between items-center p-3 bg-gray-50 rounded">
+                                    <span class="text-sm text-gray-600">Beta</span>
+                                    <span class="font-medium">1.23</span>
+                                </div>
+                                <div class="flex justify-between items-center p-3 bg-gray-50 rounded">
+                                    <span class="text-sm text-gray-600">Alpha</span>
+                                    <span class="font-medium profit-green">0.08</span>
+                                </div>
+                                <div class="flex justify-between items-center p-3 bg-gray-50 rounded">
+                                    <span class="text-sm text-gray-600">Information Ratio</span>
+                                    <span class="font-medium profit-green">1.45</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="alertsView" class="view-section">
+                    <div class="bg-white rounded-lg card-shadow p-6">
+                        <div class="flex justify-between items-center mb-4">
+                            <h3 class="text-lg font-semibold text-gray-900">Alert Center</h3>
+                            <button class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700" onclick="openModal('newAlertModal')">
+                                + New Alert
+                            </button>
+                        </div>
+                        <div class="space-y-4">
+                            <div class="p-4 border border-yellow-200 bg-yellow-50 rounded-lg">
+                                <div class="flex justify-between items-start">
+                                    <div>
+                                        <h4 class="font-medium text-yellow-800">Price Alert: TCS</h4>
+                                        <p class="text-sm text-yellow-700">Target price ₹3,300 reached</p>
+                                        <p class="text-xs text-yellow-600">2 minutes ago</p>
+                                    </div>
+                                    <button class="text-yellow-600 hover:text-yellow-800">✕</button>
+                                </div>
+                            </div>
+                            <div class="p-4 border border-red-200 bg-red-50 rounded-lg">
+                                <div class="flex justify-between items-start">
+                                    <div>
+                                        <h4 class="font-medium text-red-800">Stop Loss Triggered: INFY</h4>
+                                        <p class="text-sm text-red-700">Position closed at ₹1,542.85</p>
+                                        <p class="text-xs text-red-600">5 minutes ago</p>
+                                    </div>
+                                    <button class="text-red-600 hover:text-red-800">✕</button>
+                                </div>
+                            </div>
+                            <div class="p-4 border border-green-200 bg-green-50 rounded-lg">
+                                <div class="flex justify-between items-start">
+                                    <div>
+                                        <h4 class="font-medium text-green-800">Profit Target: RELIANCE</h4>
+                                        <p class="text-sm text-green-700">+5% profit achieved</p>
+                                        <p class="text-xs text-green-600">10 minutes ago</p>
+                                    </div>
+                                    <button class="text-green-600 hover:text-green-800">✕</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Screener View -->
+                <div id="screenerView" class="view-section">
+                    <div class="bg-white rounded-lg card-shadow p-6 mb-6">
+                        <div class="flex justify-between items-center mb-4">
+                            <h3 class="text-lg font-semibold text-gray-900">Stock Screener</h3>
+                            <div class="flex space-x-2">
+                                <button class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700" onclick="runScreener()">
+                                    🔍 Run Screener
+                                </button>
+                                <button class="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700" onclick="resetScreener()">
+                                    Reset
+                                </button>
+                            </div>
+                        </div>
+                        
+                        <!-- Screening Filters -->
+                        <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">Market Cap</label>
+                                <select class="w-full p-2 border border-gray-300 rounded" id="marketCapFilter">
+                                    <option value="">All</option>
+                                    <option value="large">Large Cap (>₹20,000 Cr)</option>
+                                    <option value="mid">Mid Cap (₹5,000-20,000 Cr)</option>
+                                    <option value="small">Small Cap (<₹5,000 Cr)</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">P/E Ratio</label>
+                                <select class="w-full p-2 border border-gray-300 rounded" id="peFilter">
+                                    <option value="">All</option>
+                                    <option value="low">Low (<15)</option>
+                                    <option value="medium">Medium (15-25)</option>
+                                    <option value="high">High (>25)</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">Price Change</label>
+                                <select class="w-full p-2 border border-gray-300 rounded" id="priceChangeFilter">
+                                    <option value="">All</option>
+                                    <option value="gainers">Top Gainers (>5%)</option>
+                                    <option value="losers">Top Losers (<-5%)</option>
+                                    <option value="stable">Stable (-2% to 2%)</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">Volume</label>
+                                <select class="w-full p-2 border border-gray-300 rounded" id="volumeFilter">
+                                    <option value="">All</option>
+                                    <option value="high">High Volume (>Avg)</option>
+                                    <option value="low">Low Volume (<Avg)</option>
+                                </select>
+                            </div>
+                        </div>
+                        
+                        <!-- Technical Filters -->
+                        <div class="border-t pt-4 mb-6">
+                            <h4 class="font-medium text-gray-900 mb-3">Technical Filters</h4>
+                            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">RSI</label>
+                                    <select class="w-full p-2 border border-gray-300 rounded" id="rsiFilter">
+                                        <option value="">All</option>
+                                        <option value="oversold">Oversold (<30)</option>
+                                        <option value="overbought">Overbought (>70)</option>
+                                        <option value="neutral">Neutral (30-70)</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">MACD</label>
+                                    <select class="w-full p-2 border border-gray-300 rounded" id="macdFilter">
+                                        <option value="">All</option>
+                                        <option value="bullish">Bullish Crossover</option>
+                                        <option value="bearish">Bearish Crossover</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">Moving Average</label>
+                                    <select class="w-full p-2 border border-gray-300 rounded" id="maFilter">
+                                        <option value="">All</option>
+                                        <option value="above">Above 50 SMA</option>
+                                        <option value="below">Below 50 SMA</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">Pattern</label>
+                                    <select class="w-full p-2 border border-gray-300 rounded" id="patternFilter">
+                                        <option value="">All</option>
+                                        <option value="breakout">Breakout</option>
+                                        <option value="support">Near Support</option>
+                                        <option value="resistance">Near Resistance</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Screener Results -->
+                    <div class="bg-white rounded-lg card-shadow">
+                        <div class="p-6 border-b">
+                            <h4 class="font-semibold text-gray-900">Screener Results</h4>
+                            <p class="text-sm text-gray-600" id="screenerResultCount">Showing all stocks</p>
+                        </div>
+                        <div class="overflow-x-auto">
+                            <table class="w-full">
+                                <thead class="bg-gray-50">
+                                    <tr>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Stock</th>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Price</th>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Change %</th>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Volume</th>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">P/E</th>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">RSI</th>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Signal</th>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-gray-200" id="screenerResults">
+                                    <!-- Results will be populated by JavaScript -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- News View -->
+                <div id="newsView" class="view-section">
+                    <div class="bg-white rounded-lg card-shadow p-6 mb-6">
+                        <div class="flex justify-between items-center mb-4">
+                            <h3 class="text-lg font-semibold text-gray-900">Market News & Updates</h3>
+                            <div class="flex space-x-2">
+                                <button class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700" onclick="refreshNews()">
+                                    🔄 Refresh News
+                                </button>
+                                <select class="px-4 py-2 border border-gray-300 rounded-lg" id="newsCategory">
+                                    <option value="all">All News</option>
+                                    <option value="market">Market Updates</option>
+                                    <option value="earnings">Earnings</option>
+                                    <option value="policy">Policy Changes</option>
+                                    <option value="global">Global Markets</option>
+                                </select>
+                            </div>
+                        </div>
+                        
+                        <!-- News Categories -->
+                        <div class="flex space-x-2 mb-6">
+                            <button class="px-4 py-2 bg-blue-100 text-blue-700 rounded-lg text-sm font-medium">Breaking News</button>
+                            <button class="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg text-sm">Market Analysis</button>
+                            <button class="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg text-sm">Company Updates</button>
+                            <button class="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg text-sm">Economic Data</button>
+                        </div>
+                    </div>
+                    
+                    <!-- News Feed -->
+                    <div class="space-y-4" id="newsFeed">
+                        <!-- News items will be populated by JavaScript -->
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modals -->
+    <div id="portfolioModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeModal('portfolioModal')">&times;</span>
+            <h2 class="text-xl font-bold mb-4">Portfolio Details</h2>
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <h3 class="font-semibold mb-2">Holdings</h3>
+                    <div class="space-y-2">
+                        <div class="flex justify-between p-2 bg-gray-50 rounded">
+                            <span>TCS (50 shares)</span>
+                            <span class="profit-green">+₹2,092</span>
+                        </div>
+                        <div class="flex justify-between p-2 bg-gray-50 rounded">
+                            <span>RELIANCE (25 shares)</span>
+                            <span class="profit-green">+₹536</span>
+                        </div>
+                        <div class="flex justify-between p-2 bg-gray-50 rounded">
+                            <span>INFY (75 shares)</span>
+                            <span class="loss-red">-₹1,834</span>
+                        </div>
+                    </div>
+                </div>
+                <div>
+                    <h3 class="font-semibold mb-2">Sector Allocation</h3>
+                    <div class="space-y-2">
+                        <div class="flex justify-between">
+                            <span>IT Services</span>
+                            <span>45%</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span>Energy</span>
+                            <span>30%</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span>Banking</span>
+                            <span>25%</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="settingsModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeModal('settingsModal')">&times;</span>
+            <h2 class="text-xl font-bold mb-4">Trading Settings</h2>
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">Risk Tolerance</label>
+                    <select class="w-full p-2 border border-gray-300 rounded">
+                        <option>Conservative</option>
+                        <option selected>Moderate</option>
+                        <option>Aggressive</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">Max Position Size (%)</label>
+                    <input type="range" min="1" max="20" value="10" class="w-full">
+                    <div class="text-sm text-gray-600">10%</div>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">Stop Loss (%)</label>
+                    <input type="number" value="5" class="w-full p-2 border border-gray-300 rounded">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">Take Profit (%)</label>
+                    <input type="number" value="15" class="w-full p-2 border border-gray-300 rounded">
+                </div>
+                <button class="w-full bg-blue-600 text-white py-2 rounded hover:bg-blue-700">Save Settings</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="newTradeModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeModal('newTradeModal')">&times;</span>
+            <h2 class="text-xl font-bold mb-4">New Trade</h2>
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">Stock Symbol</label>
+                    <input type="text" placeholder="e.g., TCS" class="w-full p-2 border border-gray-300 rounded">
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">Order Type</label>
+                        <select class="w-full p-2 border border-gray-300 rounded">
+                            <option>Market</option>
+                            <option>Limit</option>
+                            <option>Stop Loss</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">Quantity</label>
+                        <input type="number" placeholder="50" class="w-full p-2 border border-gray-300 rounded">
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">Price (₹)</label>
+                    <input type="number" placeholder="3245.60" class="w-full p-2 border border-gray-300 rounded">
+                </div>
+                <div class="flex space-x-4">
+                    <button class="flex-1 bg-green-600 text-white py-2 rounded hover:bg-green-700">Buy</button>
+                    <button class="flex-1 bg-red-600 text-white py-2 rounded hover:bg-red-700">Sell</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Sample stock data
+        const stockData = [
+            {
+                symbol: 'TCS',
+                name: 'TCS',
+                qty: 50,
+                avgPrice: 3245.60,
+                ltp: 3287.45,
+                change: 41.85,
+                changePercent: 1.29,
+                pl: 2092.50,
+                color: 'blue'
+            },
+            {
+                symbol: 'RELIANCE',
+                name: 'RELIANCE',
+                qty: 25,
+                avgPrice: 2456.80,
+                ltp: 2478.25,
+                change: 21.45,
+                changePercent: 0.87,
+                pl: 536.25,
+                color: 'green'
+            },
+            {
+                symbol: 'INFY',
+                name: 'INFY',
+                qty: 75,
+                avgPrice: 1567.30,
+                ltp: 1542.85,
+                change: -24.45,
+                changePercent: -1.56,
+                pl: -1833.75,
+                color: 'purple'
+            },
+            {
+                symbol: 'HDFCBANK',
+                name: 'HDFCBANK',
+                qty: 40,
+                avgPrice: 1678.90,
+                ltp: 1695.45,
+                change: 16.55,
+                changePercent: 0.99,
+                pl: 662.00,
+                color: 'orange'
+            }
+        ];
+
+        // Activity feed data
+        const activities = [
+            {
+                type: 'buy',
+                message: 'TCS Buy Order Executed',
+                time: '2 minutes ago',
+                amount: '+₹2,092',
+                color: 'green'
+            },
+            {
+                type: 'stop',
+                message: 'Stop Loss Triggered - INFY',
+                time: '5 minutes ago',
+                amount: '-₹1,834',
+                color: 'blue'
+            },
+            {
+                type: 'alert',
+                message: 'Alert: High Volatility Detected',
+                time: '8 minutes ago',
+                amount: '',
+                color: 'yellow'
+            },
+            {
+                type: 'sell',
+                message: 'RELIANCE Partial Exit',
+                time: '12 minutes ago',
+                amount: '+₹536',
+                color: 'green'
+            }
+        ];
+
+        // Initialize the application
+        function initializeApp() {
+            populateStockTable();
+            populateActivityFeed();
+            initializeCharts();
+            startPriceUpdates();
+        }
+
+        // Populate stock table
+        function populateStockTable() {
+            const tbody = document.getElementById('stockTableBody');
+            tbody.innerHTML = '';
+            
+            stockData.forEach(stock => {
+                const row = document.createElement('tr');
+                row.className = 'stock-row cursor-pointer';
+                row.innerHTML = `
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        <div class="flex items-center">
+                            <div class="w-8 h-8 bg-${stock.color}-100 rounded-full flex items-center justify-center mr-3">
+                                <span class="text-xs font-bold text-${stock.color}-600">${stock.symbol.substring(0, 3)}</span>
+                            </div>
+                            <div>
+                                <div class="text-sm font-medium text-gray-900">${stock.name}</div>
+                                <div class="text-sm text-gray-500">NSE</div>
+                            </div>
+                        </div>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${stock.qty}</td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">₹${stock.avgPrice.toFixed(2)}</td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">₹${stock.ltp.toFixed(2)}</td>
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        <span class="text-sm ${stock.change >= 0 ? 'profit-green' : 'loss-red'}">
+                            ${stock.change >= 0 ? '+' : ''}₹${stock.change.toFixed(2)} (${stock.change >= 0 ? '+' : ''}${stock.changePercent.toFixed(2)}%)
+                        </span>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        <span class="text-sm font-medium ${stock.pl >= 0 ? 'profit-green' : 'loss-red'}">
+                            ${stock.pl >= 0 ? '+' : ''}₹${stock.pl.toFixed(2)}
+                        </span>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        <button class="px-3 py-1 bg-red-100 text-red-700 rounded text-xs hover:bg-red-200" onclick="exitPosition('${stock.symbol}')">Exit</button>
+                    </td>
+                `;
+                tbody.appendChild(row);
+            });
+        }
+
+        // Populate activity feed
+        function populateActivityFeed() {
+            const feed = document.getElementById('activityFeed');
+            feed.innerHTML = '';
+            
+            activities.forEach(activity => {
+                const item = document.createElement('div');
+                item.className = `flex items-center justify-between p-3 bg-${activity.color}-50 rounded-lg`;
+                item.innerHTML = `
+                    <div class="flex items-center">
+                        <div class="w-2 h-2 bg-${activity.color}-500 rounded-full mr-3"></div>
+                        <div>
+                            <p class="text-sm font-medium text-gray-900">${activity.message}</p>
+                            <p class="text-xs text-gray-500">${activity.time}</p>
+                        </div>
+                    </div>
+                    ${activity.amount ? `<span class="text-sm ${activity.amount.includes('+') ? 'profit-green' : 'loss-red'}">${activity.amount}</span>` : ''}
+                `;
+                feed.appendChild(item);
+            });
+        }
+
+        // Initialize charts
+        function initializeCharts() {
+            // Candlestick chart
+            const ctx = document.getElementById('candlestickChart');
+            if (ctx) {
+                window.candlestickChart = new Chart(ctx, {
+                    type: 'bar',
+                    data: {
+                        labels: ['9:15', '10:00', '10:45', '11:30', '12:15', '1:00', '1:45', '2:30', '3:15'],
+                        datasets: [{
+                            label: 'High',
+                            data: [3210, 3235, 3265, 3275, 3255, 3285, 3300, 3310, 3295],
+                            backgroundColor: 'rgba(16, 185, 129, 0.8)',
+                            borderColor: '#10b981',
+                            borderWidth: 1
+                        }, {
+                            label: 'Low',
+                            data: [3190, 3215, 3235, 3250, 3230, 3260, 3275, 3285, 3275],
+                            backgroundColor: 'rgba(239, 68, 68, 0.8)',
+                            borderColor: '#ef4444',
+                            borderWidth: 1
+                        }, {
+                            label: 'Open',
+                            data: [3200, 3220, 3245, 3260, 3240, 3270, 3287, 3295, 3287],
+                            type: 'line',
+                            borderColor: '#3b82f6',
+                            backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                            fill: false,
+                            tension: 0.1
+                        }, {
+                            label: 'Close',
+                            data: [3205, 3225, 3250, 3265, 3245, 3275, 3292, 3300, 3290],
+                            type: 'line',
+                            borderColor: '#8b5cf6',
+                            backgroundColor: 'rgba(139, 92, 246, 0.1)',
+                            fill: false,
+                            tension: 0.1
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {
+                                display: true,
+                                position: 'top'
+                            },
+                            title: {
+                                display: true,
+                                text: 'TCS - Candlestick Pattern'
+                            }
+                        },
+                        scales: {
+                            y: {
+                                beginAtZero: false,
+                                title: {
+                                    display: true,
+                                    text: 'Price (₹)'
+                                }
+                            },
+                            x: {
+                                title: {
+                                    display: true,
+                                    text: 'Time'
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+
+            // Portfolio chart
+            const portfolioCtx = document.getElementById('portfolioChart');
+            if (portfolioCtx) {
+                new Chart(portfolioCtx, {
+                    type: 'doughnut',
+                    data: {
+                        labels: ['TCS', 'RELIANCE', 'INFY', 'HDFCBANK', 'Cash'],
+                        datasets: [{
+                            data: [35, 25, 20, 15, 5],
+                            backgroundColor: [
+                                '#3b82f6',
+                                '#10b981',
+                                '#8b5cf6',
+                                '#f59e0b',
+                                '#6b7280'
+                            ]
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false
+                    }
+                });
+            }
+
+            // Top Performers chart
+            const topPerformersCtx = document.getElementById('topPerformersChart');
+            if (topPerformersCtx) {
+                new Chart(topPerformersCtx, {
+                    type: 'bar',
+                    data: {
+                        labels: ['ADANIPORTS', 'BAJFINANCE', 'MARUTI', 'SUNPHARMA', 'WIPRO'],
+                        datasets: [{
+                            label: 'Daily Return (%)',
+                            data: [8.45, 6.78, 5.92, 4.67, 3.84],
+                            backgroundColor: [
+                                '#ef4444', // Red
+                                '#10b981', // Green
+                                '#3b82f6', // Blue
+                                '#f59e0b', // Yellow
+                                '#8b5cf6'  // Purple
+                            ],
+                            borderColor: [
+                                '#dc2626',
+                                '#059669',
+                                '#2563eb',
+                                '#d97706',
+                                '#7c3aed'
+                            ],
+                            borderWidth: 2
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {
+                                display: false
+                            },
+                            title: {
+                                display: true,
+                                text: 'Top 5 Swing Performers Today'
+                            }
+                        },
+                        scales: {
+                            y: {
+                                beginAtZero: true,
+                                title: {
+                                    display: true,
+                                    text: 'Return (%)'
+                                }
+                            },
+                            x: {
+                                title: {
+                                    display: true,
+                                    text: 'Stocks'
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+
+            // Performance chart
+            const performanceCtx = document.getElementById('performanceChart');
+            if (performanceCtx) {
+                new Chart(performanceCtx, {
+                    type: 'line',
+                    data: {
+                        labels: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun'],
+                        datasets: [{
+                            label: 'Portfolio Value',
+                            data: [200000, 215000, 208000, 225000, 240000, 245680],
+                            borderColor: '#10b981',
+                            backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                            fill: true
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false
+                    }
+                });
+            }
+        }
+
+        // View switching
+        function switchView(viewName, button) {
+            // Hide all views
+            document.querySelectorAll('.view-section').forEach(view => {
+                view.classList.remove('active');
+            });
+            
+            // Show selected view
+            document.getElementById(viewName + 'View').classList.add('active');
+            
+            // Update tab styles
+            document.querySelectorAll('button[onclick*="switchView"]').forEach(btn => {
+                btn.className = 'px-4 py-2 rounded-lg font-medium tab-inactive';
+            });
+            button.className = 'px-4 py-2 rounded-lg font-medium tab-active';
+        }
+
+        // Chart controls
+        function setTimeframe(timeframe, button) {
+            document.querySelectorAll('.chart-btn').forEach(btn => {
+                if (btn.textContent.includes('D') || btn.textContent.includes('W') || btn.textContent.includes('M') || btn.textContent.includes('Y')) {
+                    btn.classList.remove('active');
+                }
+            });
+            button.classList.add('active');
+            showNotification('Timeframe Updated', `Chart updated to ${timeframe} view`);
+        }
+
+        function setChartType(type, button) {
+            document.querySelectorAll('.chart-btn').forEach(btn => {
+                if (btn.textContent === 'Candlestick' || btn.textContent === 'Line' || btn.textContent === 'Area') {
+                    btn.classList.remove('active');
+                }
+            });
+            button.classList.add('active');
+            
+            // Update chart based on type
+            if (window.candlestickChart) {
+                window.candlestickChart.destroy();
+            }
+            
+            const ctx = document.getElementById('candlestickChart');
+            if (ctx) {
+                if (type === 'candlestick') {
+                    // Candlestick chart with OHLC data
+                    window.candlestickChart = new Chart(ctx, {
+                        type: 'bar',
+                        data: {
+                            labels: ['9:15', '10:00', '10:45', '11:30', '12:15', '1:00', '1:45', '2:30', '3:15'],
+                            datasets: [{
+                                label: 'High',
+                                data: [3210, 3235, 3265, 3275, 3255, 3285, 3300, 3310, 3295],
+                                backgroundColor: 'rgba(16, 185, 129, 0.8)',
+                                borderColor: '#10b981',
+                                borderWidth: 1
+                            }, {
+                                label: 'Low',
+                                data: [3190, 3215, 3235, 3250, 3230, 3260, 3275, 3285, 3275],
+                                backgroundColor: 'rgba(239, 68, 68, 0.8)',
+                                borderColor: '#ef4444',
+                                borderWidth: 1
+                            }, {
+                                label: 'Open',
+                                data: [3200, 3220, 3245, 3260, 3240, 3270, 3287, 3295, 3287],
+                                type: 'line',
+                                borderColor: '#3b82f6',
+                                backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                                fill: false,
+                                tension: 0.1
+                            }, {
+                                label: 'Close',
+                                data: [3205, 3225, 3250, 3265, 3245, 3275, 3292, 3300, 3290],
+                                type: 'line',
+                                borderColor: '#8b5cf6',
+                                backgroundColor: 'rgba(139, 92, 246, 0.1)',
+                                fill: false,
+                                tension: 0.1
+                            }]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            plugins: {
+                                legend: { display: true, position: 'top' },
+                                title: { display: true, text: 'TCS - Candlestick Pattern' }
+                            },
+                            scales: {
+                                y: { beginAtZero: false, title: { display: true, text: 'Price (₹)' } },
+                                x: { title: { display: true, text: 'Time' } }
+                            }
+                        }
+                    });
+                } else if (type === 'line') {
+                    // Line chart
+                    window.candlestickChart = new Chart(ctx, {
+                        type: 'line',
+                        data: {
+                            labels: ['9:15', '10:00', '10:45', '11:30', '12:15', '1:00', '1:45', '2:30', '3:15'],
+                            datasets: [{
+                                label: 'TCS Price',
+                                data: [3200, 3220, 3245, 3260, 3240, 3270, 3287, 3295, 3287],
+                                borderColor: '#3b82f6',
+                                backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                                fill: false,
+                                tension: 0.4
+                            }]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            plugins: {
+                                legend: { display: false },
+                                title: { display: true, text: 'TCS - Line Chart' }
+                            },
+                            scales: {
+                                y: { beginAtZero: false, title: { display: true, text: 'Price (₹)' } },
+                                x: { title: { display: true, text: 'Time' } }
+                            }
+                        }
+                    });
+                } else if (type === 'area') {
+                    // Area chart
+                    window.candlestickChart = new Chart(ctx, {
+                        type: 'line',
+                        data: {
+                            labels: ['9:15', '10:00', '10:45', '11:30', '12:15', '1:00', '1:45', '2:30', '3:15'],
+                            datasets: [{
+                                label: 'TCS Price',
+                                data: [3200, 3220, 3245, 3260, 3240, 3270, 3287, 3295, 3287],
+                                borderColor: '#10b981',
+                                backgroundColor: 'rgba(16, 185, 129, 0.3)',
+                                fill: true,
+                                tension: 0.4
+                            }]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            plugins: {
+                                legend: { display: false },
+                                title: { display: true, text: 'TCS - Area Chart' }
+                            },
+                            scales: {
+                                y: { beginAtZero: false, title: { display: true, text: 'Price (₹)' } },
+                                x: { title: { display: true, text: 'Time' } }
+                            }
+                        }
+                    });
+                }
+            }
+            
+            showNotification('Chart Type Changed', `Switched to ${type} chart`);
+        }
+
+        function toggleIndicator(indicator) {
+            showNotification('Indicator Toggled', `${indicator.toUpperCase()} indicator updated`);
+        }
+
+        // Modal functions
+        function openModal(modalId) {
+            document.getElementById(modalId).style.display = 'block';
+        }
+
+        function closeModal(modalId) {
+            document.getElementById(modalId).style.display = 'none';
+        }
+
+        // Trading functions
+        function refreshPrices() {
+            updatePrices();
+            showNotification('Prices Updated', 'All stock prices refreshed');
+        }
+
+        function exitPosition(symbol) {
+            if (confirm(`Are you sure you want to exit your ${symbol} position?`)) {
+                showNotification('Position Closed', `${symbol} position has been closed`);
+                // Remove from stock data and update table
+                const index = stockData.findIndex(stock => stock.symbol === symbol);
+                if (index > -1) {
+                    stockData.splice(index, 1);
+                    populateStockTable();
+                }
+            }
+        }
+
+        function emergencyStop() {
+            if (confirm('This will stop all active trades immediately. Are you sure?')) {
+                showNotification('Emergency Stop', 'All trades have been stopped!');
+                stockData.length = 0;
+                populateStockTable();
+            }
+        }
+
+        // Price updates
+        function updatePrices() {
+            stockData.forEach(stock => {
+                const change = (Math.random() - 0.5) * 20;
+                stock.ltp += change;
+                stock.change = stock.ltp - stock.avgPrice;
+                stock.changePercent = (stock.change / stock.avgPrice) * 100;
+                stock.pl = stock.change * stock.qty;
+            });
+            populateStockTable();
+        }
+
+        function startPriceUpdates() {
+            setInterval(updatePrices, 5000);
+        }
+
+        // Notification system
+        function showNotification(title, message) {
+            const notification = document.getElementById('notification');
+            document.getElementById('notificationTitle').textContent = title;
+            document.getElementById('notificationMessage').textContent = message;
+            
+            notification.classList.add('show');
+            
+            setTimeout(() => {
+                notification.classList.remove('show');
+            }, 3000);
+        }
+
+        // Event listeners
+        document.getElementById('stopLossToggle').addEventListener('change', function() {
+            const status = this.checked ? 'enabled' : 'disabled';
+            showNotification('Stop Loss Alerts', `Notifications ${status}`);
+        });
+
+        // Close modals when clicking outside
+        window.onclick = function(event) {
+            if (event.target.classList.contains('modal')) {
+                event.target.style.display = 'none';
+            }
+        }
+
+        // Screener data
+        const screenerData = [
+            { symbol: 'TCS', price: 3287.45, change: 1.29, volume: '2.4M', pe: 24.5, rsi: 67.8, signal: 'BUY', marketCap: 'large' },
+            { symbol: 'RELIANCE', price: 2478.25, change: 0.87, volume: '3.1M', pe: 18.2, rsi: 45.3, signal: 'HOLD', marketCap: 'large' },
+            { symbol: 'INFY', price: 1542.85, change: -1.56, volume: '1.8M', pe: 22.1, rsi: 34.2, signal: 'SELL', marketCap: 'large' },
+            { symbol: 'HDFCBANK', price: 1695.45, change: 0.99, volume: '2.7M', pe: 19.8, rsi: 58.9, signal: 'BUY', marketCap: 'large' },
+            { symbol: 'ADANIPORTS', price: 756.30, change: 8.45, volume: '4.2M', pe: 15.6, rsi: 78.4, signal: 'BUY', marketCap: 'large' },
+            { symbol: 'BAJFINANCE', price: 6234.80, change: 6.78, volume: '1.5M', pe: 28.3, rsi: 72.1, signal: 'BUY', marketCap: 'large' },
+            { symbol: 'MARUTI', price: 9876.45, change: 5.92, volume: '0.8M', pe: 21.7, rsi: 65.8, signal: 'BUY', marketCap: 'large' },
+            { symbol: 'SUNPHARMA', price: 1123.60, change: 4.67, volume: '2.1M', pe: 16.9, rsi: 61.2, signal: 'BUY', marketCap: 'large' }
+        ];
+
+        // News data
+        const newsData = [
+            {
+                title: 'Market Rally Continues as Nifty Hits New High',
+                summary: 'Indian stock markets extended their winning streak with Nifty 50 touching a fresh all-time high of 20,150 points.',
+                time: '2 hours ago',
+                category: 'market',
+                source: 'Economic Times',
+                impact: 'positive'
+            },
+            {
+                title: 'TCS Reports Strong Q3 Results, Revenue Up 12%',
+                summary: 'Tata Consultancy Services posted robust quarterly results with revenue growth of 12% YoY and margin expansion.',
+                time: '4 hours ago',
+                category: 'earnings',
+                source: 'Business Standard',
+                impact: 'positive'
+            },
+            {
+                title: 'RBI Keeps Repo Rate Unchanged at 6.5%',
+                summary: 'Reserve Bank of India maintains status quo on interest rates, citing inflation concerns and growth momentum.',
+                time: '6 hours ago',
+                category: 'policy',
+                source: 'Mint',
+                impact: 'neutral'
+            },
+            {
+                title: 'Foreign Investors Turn Net Buyers After 3 Months',
+                summary: 'FIIs invested ₹2,847 crore in Indian equities this week, marking a shift from selling trend.',
+                time: '8 hours ago',
+                category: 'market',
+                source: 'Moneycontrol',
+                impact: 'positive'
+            },
+            {
+                title: 'Adani Group Stocks Surge on Infrastructure Orders',
+                summary: 'Adani portfolio companies rally up to 8% after securing major infrastructure projects worth ₹15,000 crore.',
+                time: '10 hours ago',
+                category: 'market',
+                source: 'CNBC TV18',
+                impact: 'positive'
+            },
+            {
+                title: 'Global Markets Mixed Amid Fed Rate Concerns',
+                summary: 'Asian markets trade mixed as investors await US Federal Reserve policy signals on interest rate trajectory.',
+                time: '12 hours ago',
+                category: 'global',
+                source: 'Reuters',
+                impact: 'neutral'
+            }
+        ];
+
+        // Screener functions
+        function runScreener() {
+            const marketCap = document.getElementById('marketCapFilter').value;
+            const pe = document.getElementById('peFilter').value;
+            const priceChange = document.getElementById('priceChangeFilter').value;
+            const volume = document.getElementById('volumeFilter').value;
+            const rsi = document.getElementById('rsiFilter').value;
+            
+            let filteredData = [...screenerData];
+            
+            // Apply filters
+            if (marketCap) {
+                filteredData = filteredData.filter(stock => stock.marketCap === marketCap);
+            }
+            
+            if (pe) {
+                filteredData = filteredData.filter(stock => {
+                    if (pe === 'low') return stock.pe < 15;
+                    if (pe === 'medium') return stock.pe >= 15 && stock.pe <= 25;
+                    if (pe === 'high') return stock.pe > 25;
+                    return true;
+                });
+            }
+            
+            if (priceChange) {
+                filteredData = filteredData.filter(stock => {
+                    if (priceChange === 'gainers') return stock.change > 5;
+                    if (priceChange === 'losers') return stock.change < -5;
+                    if (priceChange === 'stable') return stock.change >= -2 && stock.change <= 2;
+                    return true;
+                });
+            }
+            
+            if (rsi) {
+                filteredData = filteredData.filter(stock => {
+                    if (rsi === 'oversold') return stock.rsi < 30;
+                    if (rsi === 'overbought') return stock.rsi > 70;
+                    if (rsi === 'neutral') return stock.rsi >= 30 && stock.rsi <= 70;
+                    return true;
+                });
+            }
+            
+            populateScreenerResults(filteredData);
+            document.getElementById('screenerResultCount').textContent = `Showing ${filteredData.length} stocks`;
+            showNotification('Screener Updated', `Found ${filteredData.length} matching stocks`);
+        }
+
+        function resetScreener() {
+            document.getElementById('marketCapFilter').value = '';
+            document.getElementById('peFilter').value = '';
+            document.getElementById('priceChangeFilter').value = '';
+            document.getElementById('volumeFilter').value = '';
+            document.getElementById('rsiFilter').value = '';
+            document.getElementById('macdFilter').value = '';
+            document.getElementById('maFilter').value = '';
+            document.getElementById('patternFilter').value = '';
+            
+            populateScreenerResults(screenerData);
+            document.getElementById('screenerResultCount').textContent = 'Showing all stocks';
+            showNotification('Screener Reset', 'All filters cleared');
+        }
+
+        function populateScreenerResults(data) {
+            const tbody = document.getElementById('screenerResults');
+            tbody.innerHTML = '';
+            
+            data.forEach(stock => {
+                const row = document.createElement('tr');
+                row.className = 'hover:bg-gray-50';
+                row.innerHTML = `
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        <div class="font-medium text-gray-900">${stock.symbol}</div>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">₹${stock.price.toFixed(2)}</td>
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        <span class="text-sm ${stock.change >= 0 ? 'profit-green' : 'loss-red'}">
+                            ${stock.change >= 0 ? '+' : ''}${stock.change.toFixed(2)}%
+                        </span>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${stock.volume}</td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${stock.pe}</td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${stock.rsi}</td>
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        <span class="px-2 py-1 text-xs rounded ${
+                            stock.signal === 'BUY' ? 'bg-green-100 text-green-800' :
+                            stock.signal === 'SELL' ? 'bg-red-100 text-red-800' :
+                            'bg-yellow-100 text-yellow-800'
+                        }">${stock.signal}</span>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        <button class="px-3 py-1 bg-blue-100 text-blue-700 rounded text-xs hover:bg-blue-200" onclick="addToWatchlist('${stock.symbol}')">
+                            Add to Watchlist
+                        </button>
+                    </td>
+                `;
+                tbody.appendChild(row);
+            });
+        }
+
+        function addToWatchlist(symbol) {
+            showNotification('Added to Watchlist', `${symbol} added to your watchlist`);
+        }
+
+        // News functions
+        function refreshNews() {
+            populateNewsFeed(newsData);
+            showNotification('News Updated', 'Latest market news refreshed');
+        }
+
+        function populateNewsFeed(data) {
+            const feed = document.getElementById('newsFeed');
+            feed.innerHTML = '';
+            
+            data.forEach(news => {
+                const item = document.createElement('div');
+                item.className = 'bg-white rounded-lg card-shadow p-6';
+                item.innerHTML = `
+                    <div class="flex justify-between items-start mb-3">
+                        <div class="flex items-center space-x-2">
+                            <span class="px-2 py-1 text-xs rounded ${
+                                news.category === 'market' ? 'bg-blue-100 text-blue-800' :
+                                news.category === 'earnings' ? 'bg-green-100 text-green-800' :
+                                news.category === 'policy' ? 'bg-purple-100 text-purple-800' :
+                                'bg-gray-100 text-gray-800'
+                            }">${news.category.toUpperCase()}</span>
+                            <span class="text-xs text-gray-500">${news.source}</span>
+                        </div>
+                        <div class="flex items-center space-x-2">
+                            <span class="w-2 h-2 rounded-full ${
+                                news.impact === 'positive' ? 'bg-green-500' :
+                                news.impact === 'negative' ? 'bg-red-500' :
+                                'bg-yellow-500'
+                            }"></span>
+                            <span class="text-xs text-gray-500">${news.time}</span>
+                        </div>
+                    </div>
+                    <h4 class="font-semibold text-gray-900 mb-2">${news.title}</h4>
+                    <p class="text-sm text-gray-600 mb-3">${news.summary}</p>
+                    <div class="flex justify-between items-center">
+                        <button class="text-blue-600 hover:text-blue-800 text-sm font-medium">Read More</button>
+                        <div class="flex space-x-2">
+                            <button class="text-gray-400 hover:text-gray-600">📤</button>
+                            <button class="text-gray-400 hover:text-gray-600">🔖</button>
+                        </div>
+                    </div>
+                `;
+                feed.appendChild(item);
+            });
+        }
+
+        // Initialize screener and news on app load
+        function initializeScreenerAndNews() {
+            populateScreenerResults(screenerData);
+            populateNewsFeed(newsData);
+        }
+
+        // Initialize the app when page loads
+        document.addEventListener('DOMContentLoaded', function() {
+            initializeApp();
+            initializeScreenerAndNews();
+        });
+    </script>
+<script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'9609810745ef4924',t:'MTc1Mjc1Mjg0MS4wMDAwMDA='};var a=document.createElement('script');a.nonce='';a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+</html>

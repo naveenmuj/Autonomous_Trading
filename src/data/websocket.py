@@ -25,7 +25,21 @@ if not any(isinstance(h, logging.FileHandler) and getattr(h, 'baseFilename', '')
     app_logger.addHandler(app_log_handler)
     app_logger.propagate = False
 
+# Global WebSocket instance to prevent multiple connections
+_global_websocket_instance = None
+_websocket_lock = threading.Lock()
+
 class MarketDataWebSocket(SmartWebSocketV2):
+    def add_message_callback(self, callback):
+        """Add a callback function to be called on every raw WebSocket message (text or binary)."""
+        if not hasattr(self, '_message_callbacks'):
+            self._message_callbacks = []
+        self._message_callbacks.append(callback)
+
+    def remove_message_callback(self, callback):
+        """Remove a previously added message callback function."""
+        if hasattr(self, '_message_callbacks') and callback in self._message_callbacks:
+            self._message_callbacks.remove(callback)
     # Exchange type constants
     EXCHANGE_TYPE_MAP = {
         'NSE': 1,
@@ -100,7 +114,7 @@ class MarketDataWebSocket(SmartWebSocketV2):
         )
         # Assign event/callback handlers as in the test script
         self.ws.on_open = self._on_open  # Use correct handler
-        self.ws.on_data = self._on_message  # Use correct handler
+        self.ws.on_data = self._on_data  # Use correct handler for data messages
         self.ws.on_error = self._on_error  # Use correct handler
         self.ws.on_close = self._on_close  # Use correct handler
         
@@ -206,14 +220,14 @@ class MarketDataWebSocket(SmartWebSocketV2):
         """Wait for WebSocket connection to be established."""
         return self._connection_event.wait(timeout=timeout)
         
-    def connect(self) -> None:
-        """Connect using SmartWebSocketV2 logic (call self.ws.connect)"""
+    def connect(self) -> bool:
+        """Connect using SmartWebSocketV2 logic with enhanced error handling"""
         try:
             # Check market hours
             if not is_market_open():
                 wait_time = format_time_until_market_open()
                 logger.warning(f"Market is currently closed. Next market opening in {wait_time}")
-                # Removed simulation mode: always connect, just log
+                # Still try to connect for after-hours data
             else:
                 logger.info("[DIAGNOSTIC] WebSocket is running in LIVE mode.")
 
@@ -224,14 +238,43 @@ class MarketDataWebSocket(SmartWebSocketV2):
             self.stopping = False
 
             # Call SmartWebSocketV2 connect
-            self.ws.connect()
-            logger.info("WebSocket connection initiated (SmartWebSocketV2 logic)")
+            logger.info("About to call SmartWebSocketV2.connect()")
+            
+            # Start connect in a separate thread to avoid blocking
+            def connect_websocket():
+                try:
+                    logger.info("Starting SmartWebSocketV2.connect() in thread...")
+                    self.ws.connect()
+                    logger.info("SmartWebSocketV2.connect() completed")
+                except Exception as e:
+                    logger.error(f"Exception in SmartWebSocketV2.connect(): {e}")
+                    self.connection_state = self.DISCONNECTED
+            
+            connect_thread = threading.Thread(target=connect_websocket, daemon=True)
+            connect_thread.start()
+            logger.info("WebSocket connection thread started")
+            
+            # Wait for connection to establish
+            logger.info("Waiting for connection event...")
+            success = self.wait_for_connection(timeout=20)  # Increased timeout
+            logger.info(f"wait_for_connection returned: {success}")
+            logger.info(f"is_connected status: {self.is_connected}")
+            logger.info(f"connection_state: {self.connection_state}")
+            
+            if success and self.is_connected:
+                logger.info("WebSocket connection established successfully")
+                return True
+            else:
+                logger.error(f"WebSocket connection failed or timed out - success={success}, is_connected={self.is_connected}")
+                self.connection_state = self.DISCONNECTED
+                return False
+                
         except Exception as e:
             self.connection_state = self.DISCONNECTED
             logger.error(f"Connection error: {str(e)}")
-            raise
+            return False
 
-    def _on_open(self, ws=None):
+    def _on_open(self, wsapp):
         """Handle WebSocket connection open with improved state management and diagnostics"""
         logger.info("[HANDLER] _on_open called")
         try:
@@ -277,7 +320,7 @@ class MarketDataWebSocket(SmartWebSocketV2):
             logger.error(f"Error in connection open handler: {str(e)}")
             self.connection_state = self.DISCONNECTED
 
-    def _on_close(self, ws=None, close_status_code=None, close_msg=None):
+    def _on_close(self, ws, close_status_code, close_msg):
         logger.info(f"[HANDLER] _on_close called (Status: {close_status_code}, Message: {close_msg})")
         try:
             logger.info(f"WebSocket connection closed (Status: {close_status_code}, Message: {close_msg}) [DIAGNOSTIC]")
@@ -298,45 +341,102 @@ class MarketDataWebSocket(SmartWebSocketV2):
         logger.error(f"[HANDLER] _on_error called: {error}")
         logger.error(f"WebSocket error: {error} [DIAGNOSTIC]")
 
-    def _on_message(self, ws=None, message=None):
-        logger.debug(f"[HANDLER] _on_message called with message: {repr(message)}")
+    def _on_data(self, wsapp, message):
+        logger.debug(f"[HANDLER] _on_data called with message: {repr(message)}")
         # Aggressive diagnostics: log every raw message
         app_logger = logging.getLogger("app")
         app_logger.info(f"[RAW_WS_MESSAGE] {repr(message)}")
-        # ...existing code...
         try:
             logger.debug(f"[WS-RAW] Received message: {repr(message)}")
             self._last_message_time = time.time()
             if not message:
                 return
-                
+            # Call message callbacks if any
+            if hasattr(self, '_message_callbacks'):
+                for cb in self._message_callbacks:
+                    try:
+                        cb(message)
+                    except Exception as e:
+                        logger.error(f"Error in message callback: {e}")
             if isinstance(message, str):
                 if message.lower() == 'pong':
                     self._last_heartbeat = time.time()
                     return
-                    
                 # Handle text messages (subscription responses, etc)
                 try:
                     data = json.loads(message)
-                    if 'action' in data:
-                        if data['action'] == 'subscribe':
-                            if data.get('status', False):
-                                logger.info(f"Subscription successful: {data}")
-                                app_logger.info(f"[SUBSCRIBE_OK] {data}")
-                            else:
-                                logger.error(f"Subscription failed: {data.get('message', 'Unknown error')} | Full response: {data}")
-                                app_logger.error(f"[SUBSCRIBE_FAIL] {data}")
-                        elif data['action'] == 'unsubscribe':
-                            if data.get('status', False):
-                                logger.info(f"Unsubscription successful: {data}")
-                            else:
-                                logger.error(f"Unsubscription failed: {data.get('message', 'Unknown error')} | Full response: {data}")
-                        else:
-                            logger.info(f"WebSocket message: {data}")
                 except json.JSONDecodeError:
                     logger.warning(f"Received non-JSON text message: {message}")
+                    return
+            elif isinstance(message, dict):
+                # Message is already a dict (no need to parse JSON)
+                data = message
+            else:
+                # Handle binary data
+                if isinstance(message, bytes):
+                    # Patch: log every tick received for diagnostics
+                    try:
+                        tick_token = self._extract_token_from_binary(message)
+                        logger.debug(f"Received binary tick for token {tick_token}")
+                        app_logger.info(f"[BINARY_TICK_RAW] token={tick_token} bytes={message[:32].hex()}")
+                    except Exception:
+                        logger.debug("Received binary tick (token extraction failed)")
+                        app_logger.info(f"[BINARY_TICK_RAW] token=UNKNOWN bytes={message[:32].hex()}")
+                    self._handle_binary_data(message)
                 return
             
+            # Handle market data in JSON format (like in test case)
+            if isinstance(data, dict) and 'token' in data and 'last_traded_price' in data:
+                        token = str(data.get('token', ''))
+                        
+                        # Process market data similar to test case
+                        tick_data = {
+                            'token': token,
+                            'ltp': float(data.get('last_traded_price', 0)) / 100.0,  # Convert price like test case
+                            'volume': int(data.get('volume_trade_for_the_day', 0)),
+                            'bid_price': float(data.get('best_5_buy_data', [{}])[0].get('price', 0)) / 100.0 if data.get('best_5_buy_data') else 0.0,
+                            'ask_price': float(data.get('best_5_sell_data', [{}])[0].get('price', 0)) / 100.0 if data.get('best_5_sell_data') else 0.0,
+                            'open': float(data.get('open_price_of_the_day', 0)) / 100.0,
+                            'high': float(data.get('high_price_of_the_day', 0)) / 100.0,
+                            'low': float(data.get('low_price_of_the_day', 0)) / 100.0,
+                            'close': float(data.get('closed_price', 0)) / 100.0,
+                            'timestamp': datetime.fromtimestamp(int(data.get('exchange_timestamp', time.time() * 1000)) / 1000),
+                            'source': 'websocket_json'
+                        }
+                        
+                        # Store in live feed
+                        self.live_feed[token] = tick_data
+                        
+                        # Log the market data
+                        logger.info(f"[JSON_TICK] Token: {token}, LTP: ₹{tick_data['ltp']:.2f}, Volume: {tick_data['volume']:,}")
+                        app_logger.info(f"[JSON_LTP] Token: {token}, LTP: {tick_data['ltp']}, Time: {tick_data['timestamp']}")
+                        
+                        # Notify callbacks
+                        with self._callback_lock:
+                            for callback in self.tick_callbacks:
+                                try:
+                                    callback(tick_data)
+                                except Exception as e:
+                                    logger.error(f"Error in tick callback: {str(e)}")
+                        return
+                    
+            # Handle subscription responses
+            if 'action' in data:
+                if data['action'] == 'subscribe':
+                    if data.get('status', False):
+                        logger.info(f"Subscription successful: {data}")
+                        app_logger.info(f"[SUBSCRIBE_OK] {data}")
+                    else:
+                        logger.error(f"Subscription failed: {data.get('message', 'Unknown error')} | Full response: {data}")
+                        app_logger.error(f"[SUBSCRIBE_FAIL] {data}")
+                elif data['action'] == 'unsubscribe':
+                    if data.get('status', False):
+                        logger.info(f"Unsubscription successful: {data}")
+                    else:
+                        logger.error(f"Unsubscription failed: {data.get('message', 'Unknown error')} | Full response: {data}")
+                else:
+                    logger.info(f"WebSocket message: {data}")
+        except Exception as e:
             # Handle binary data
             if isinstance(message, bytes):
                 # Patch: log every tick received for diagnostics
@@ -348,10 +448,25 @@ class MarketDataWebSocket(SmartWebSocketV2):
                     logger.debug("Received binary tick (token extraction failed)")
                     app_logger.info(f"[BINARY_TICK_RAW] token=UNKNOWN bytes={message[:32].hex()}")
                 self._handle_binary_data(message)
-            
         except Exception as e:
             logger.error(f"Error in raw message handler: {str(e)}")
             app_logger.error(f"[WS_HANDLER_ERROR] {str(e)} | Message: {repr(message)}")
+
+    def _extract_token_from_binary(self, data: bytes) -> str:
+        """Extract token from binary data for logging purposes"""
+        try:
+            if len(data) < 27:
+                return "UNKNOWN"
+            
+            # Extract token (null-terminated string)
+            token = ""
+            for i in range(2, 27):
+                if data[i:i+1] == b'\x00':
+                    break
+                token += data[i:i+1].decode('utf-8')
+            return token if token else "UNKNOWN"
+        except Exception:
+            return "UNKNOWN"
 
     def _handle_binary_data(self, data: bytes):
         """Handle binary market data according to WebSocket 2.0 spec"""
@@ -553,6 +668,37 @@ class MarketDataWebSocket(SmartWebSocketV2):
             logger.error(f"Error in unsubscribe: {str(e)}")
             raise
 
+    def close(self):
+        """Close WebSocket connection gracefully"""
+        try:
+            logger.info("Closing WebSocket connection...")
+            self.stopping = True
+            
+            # Set state to disconnecting
+            self.connection_state = self.DISCONNECTING
+            
+            # Stop heartbeat thread
+            if hasattr(self, '_heartbeat_thread') and self._heartbeat_thread:
+                self._heartbeat_thread = None
+            
+            # Close the WebSocket connection
+            if hasattr(self, 'ws') and self.ws:
+                try:
+                    self.ws.close()
+                    logger.info("WebSocket connection closed successfully")
+                except Exception as e:
+                    logger.debug(f"Error closing WebSocket: {e}")
+            
+            # Clear state
+            self.connection_state = self.DISCONNECTED
+            self._connection_ready = False
+            self._connection_event.clear()
+            self.subscribed_tokens.clear()
+            self.pending_subscriptions.clear()
+            
+        except Exception as e:
+            logger.error(f"Error closing WebSocket: {e}")
+
     def get_market_data(self, token: str) -> Optional[Dict[str, Any]]:
         """Get latest market data for a token
         
@@ -655,3 +801,50 @@ class MarketDataWebSocket(SmartWebSocketV2):
                 'error': str(e),
                 'subscriptions': {'NSE': []}  # Return empty subscriptions on error
             }
+
+def get_websocket_instance(auth_token: str, api_key: str, client_code: str, feed_token: str, config: Dict[str, Any] = None, debug: bool = False) -> MarketDataWebSocket:
+    """Get or create a singleton WebSocket instance to prevent connection limit errors"""
+    global _global_websocket_instance
+    
+    with _websocket_lock:
+        # If instance exists and tokens match, reuse it
+        if (_global_websocket_instance and 
+            _global_websocket_instance.auth_token == auth_token and
+            _global_websocket_instance.feed_token == feed_token):
+            logger.info("Reusing existing WebSocket instance")
+            return _global_websocket_instance
+        
+        # Close existing instance if tokens are different
+        if _global_websocket_instance:
+            logger.info("Closing existing WebSocket instance (token mismatch)")
+            try:
+                _global_websocket_instance.close()
+            except:
+                pass
+            _global_websocket_instance = None
+        
+        # Create new instance
+        logger.info("Creating new WebSocket instance")
+        _global_websocket_instance = MarketDataWebSocket(
+            auth_token=auth_token,
+            api_key=api_key,
+            client_code=client_code,
+            feed_token=feed_token,
+            config=config,
+            debug=debug
+        )
+        
+        return _global_websocket_instance
+
+def close_global_websocket():
+    """Close the global WebSocket instance"""
+    global _global_websocket_instance
+    
+    with _websocket_lock:
+        if _global_websocket_instance:
+            logger.info("Closing global WebSocket instance")
+            try:
+                _global_websocket_instance.close()
+            except:
+                pass
+            _global_websocket_instance = None

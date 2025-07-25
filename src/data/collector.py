@@ -12,8 +12,9 @@ import pandas as pd
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timedelta
 from functools import wraps
+from pathlib import Path
 from SmartApi import SmartConnect
-from .websocket import MarketDataWebSocket
+from .websocket import MarketDataWebSocket, get_websocket_instance, close_global_websocket
 import threading
 import talib
 
@@ -36,7 +37,7 @@ def with_rate_limit(max_retries=5, initial_delay=2.0):
                     else:
                         raise
             logger.error(f"Exceeded max retries for rate-limited function {func.__name__}")
-            return func(*args, **kwargs)
+            raise Exception(f"Rate limit exceeded after {max_retries} attempts for {func.__name__}")
         return wrapper
     return decorator
 
@@ -61,141 +62,210 @@ class RateLimiter:
         return False
 
 class DataCollector:
-    # --- Rate limiting state for historical data API ---
-    _hist_api_calls_sec = []  # timestamps of calls in last second
-    _hist_api_calls_min = []  # timestamps of calls in last minute
-    _hist_api_calls_hr = []   # timestamps of calls in last hour
-    _hist_api_lock = threading.Lock()
-
-    def get_historical_data(self, symbol, days=10, interval='ONE_DAY'):
-        import time
-        from datetime import datetime, timedelta
-        # --- Rate limit constants (official) ---
-        HIST_API_LIMIT_SEC = 3
-        HIST_API_LIMIT_MIN = 180
-        HIST_API_LIMIT_HR = 5000
-
-        def _rate_limit_wait():
-            now = time.time()
-            with self._hist_api_lock:
-                # Clean up old timestamps
-                self._hist_api_calls_sec = [t for t in self._hist_api_calls_sec if t > now - 1]
-                self._hist_api_calls_min = [t for t in self._hist_api_calls_min if t > now - 60]
-                self._hist_api_calls_hr = [t for t in self._hist_api_calls_hr if t > now - 3600]
-                # If any limit exceeded, calculate wait time
-                wait_times = []
-                if len(self._hist_api_calls_sec) >= HIST_API_LIMIT_SEC:
-                    wait_times.append(1 - (now - self._hist_api_calls_sec[0]))
-                if len(self._hist_api_calls_min) >= HIST_API_LIMIT_MIN:
-                    wait_times.append(60 - (now - self._hist_api_calls_min[0]))
-                if len(self._hist_api_calls_hr) >= HIST_API_LIMIT_HR:
-                    wait_times.append(3600 - (now - self._hist_api_calls_hr[0]))
-                if wait_times:
-                    wait_time = max(wait_times)
-                    logger.warning(f"[RATE LIMIT] Waiting {wait_time:.2f}s to comply with Angel One historical data API limits.")
-                    time.sleep(max(wait_time, 0.01))
-                # Register this call
-                self._hist_api_calls_sec.append(now)
-                self._hist_api_calls_min.append(now)
-                self._hist_api_calls_hr.append(now)
-
-        """
-        Fetch historical OHLCV data for a symbol, with candlestick pattern detection.
-        This method should be called by all model/data consumers.
-        """
-        try:
-            if self.angel_api is None:
-                logger.error("Angel One API not initialized.")
-                return pd.DataFrame()
-            end_date = datetime.now()
-            min_date = datetime(2000, 1, 1)
-            if days < 1:
-                logger.warning(f"Requested days < 1, adjusting to 1.")
-                days = 1
-            start_date = end_date - timedelta(days=days)
-            if start_date < min_date:
-                logger.warning(f"Requested start_date {start_date.date()} before 2000-01-01, adjusting to 2000-01-01.")
-                start_date = min_date
-            if end_date > datetime.now():
-                logger.warning(f"Requested end_date {end_date.date()} is in the future, adjusting to today.")
-                end_date = datetime.now()
-            if interval == 'ONE_DAY':
-                start_str = start_date.strftime('%Y-%m-%d') + ' 09:15'
-                end_str = end_date.strftime('%Y-%m-%d') + ' 15:30'
+    _instance = None
+    _lock = threading.Lock()
+    
+    def __new__(cls, config):
+        """Implement singleton pattern to prevent multiple instances"""
+        with cls._lock:
+            if cls._instance is None:
+                logger.info("Creating new DataCollector instance (singleton)")
+                cls._instance = super(DataCollector, cls).__new__(cls)
+                cls._instance._initialized = False
             else:
-                start_str = start_date.strftime('%Y-%m-%d %H:%M')
-                end_str = end_date.strftime('%Y-%m-%d %H:%M')
-            logger.info(f"Requesting historical data for {symbol} from {start_str} to {end_str} (interval: {interval})")
-            token = self.symbol_token_map.get(symbol)
-            if token is None:
-                token = self.symbol_token_map.get(symbol.replace('.NS', ''))
-            if token is None:
-                token = self.symbol_token_map.get(symbol.replace('.NS', '-EQ'))
-            if token is None:
-                logger.error(f"No token found for symbol {symbol} (tried direct, base, and -EQ)")
-                return pd.DataFrame()
-            params = {
-                "exchange": "NSE",
-                "symboltoken": token,
-                "interval": interval,
-                "fromdate": start_str,
-                "todate": end_str,
-            }
-            max_retries = 5
-            retry_wait = self.config.get('api_rate_limit_wait', 2)
-            for attempt in range(max_retries):
-                _rate_limit_wait()
-                response = self.angel_api.getCandleData(params)
-                if response and 'data' in response:
-                    candles = response['data']
-                    df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                    df['timestamp'] = pd.to_datetime(df['timestamp'])
-                    # --- DIAGNOSTIC: OHLCV completeness check ---
-                    expected_rows = self._calculate_expected_rows(start_date, end_date, interval)
-                    actual_rows = len(df)
-                    missing_timestamps = []
-                    if 'timestamp' in df.columns:
-                        df_sorted = df.sort_values('timestamp')
-                        all_expected = pd.date_range(start=start_date, end=end_date, freq=self._interval_to_pandas_freq(interval))
-                        actual_set = set(pd.to_datetime(df_sorted['timestamp']))
-                        missing_timestamps = [ts for ts in all_expected if ts not in actual_set]
-                    logger.info(f"[DIAGNOSTIC] {symbol}: Expected rows={expected_rows}, Actual rows={actual_rows}, Missing timestamps={len(missing_timestamps)}")
-                    if missing_timestamps:
-                        logger.warning(f"[DIAGNOSTIC] {symbol}: Missing timestamps: {missing_timestamps[:10]}{'...' if len(missing_timestamps)>10 else ''}")
-                    if actual_rows < expected_rows:
-                        logger.warning(f"[DIAGNOSTIC] {symbol}: Fetched fewer rows than expected. Possible API/data issue.")
-                    for col in ['open', 'high', 'low', 'close', 'volume']:
-                        df[col] = pd.to_numeric(df[col], errors='coerce')
-                    # Verification log: check required columns
-                    required_cols = ['open', 'high', 'low', 'close', 'volume']
-                    missing_cols = [col for col in required_cols if col not in df.columns]
-                    if missing_cols:
-                        logger.error(f"Missing columns {missing_cols} in historical data for {symbol}. Failing fetch.")
-                        return pd.DataFrame()
-                    if df.isnull().any().any():
-                        logger.warning(f"Null values found in historical data for {symbol}. Shape: {df.shape}")
-                    if len(df) < 60:
-                        logger.error(f"Insufficient data points ({len(df)}) for {symbol}. Failing fetch.")
-                        return pd.DataFrame()
-                    df = self.detect_candlestick_patterns(df)
-                    if 'pattern' not in df.columns:
-                        logger.warning(f"Pattern detection failed for {symbol}, adding default 'None' values.")
-                        df['pattern'] = 'None'
-                    else:
-                        logger.info(f"Pattern detection completed for {symbol}. Example patterns: {df['pattern'].value_counts().to_dict()}")
-                    return df
-                else:
-                    if response and b'access rate' in str(response).lower():
-                        logger.warning(f"Rate limit exceeded for {symbol}. Waiting {retry_wait} seconds before retry.")
-                        time.sleep(retry_wait)
-                    else:
-                        logger.error(f"No data returned for {symbol} from API. Attempt {attempt+1}/{max_retries}")
-                        time.sleep(retry_wait)
-            logger.error(f"Failed to fetch historical data for {symbol} after {max_retries} retries.")
-            return pd.DataFrame()
+                logger.info("Returning existing DataCollector instance (singleton)")
+            return cls._instance
+    
+    @staticmethod
+    def fetch_nse_holidays(year=None):
+        """Fetch NSE trading holidays for the given year from the official NSE website. Returns a set of date objects. Robust fallback: API -> HTML scrape -> CSV cache -> static."""
+        import requests
+        import pandas as pd
+        from datetime import datetime
+        import os
+        holidays = set()
+        if year is None:
+            year = datetime.now().year
+        url = f"https://www.nseindia.com/api/holiday-master?type=trading&year={year}"
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json, text/plain, */*",
+        }
+        # 1. Try official API
+        try:
+            resp = requests.get(url, headers=headers, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                for entry in data.get("CM", []):
+                    try:
+                        dt = datetime.strptime(entry['tradingDate'], "%d-%b-%Y").date()
+                        holidays.add(dt)
+                    except Exception:
+                        continue
+                if holidays:
+                    logger.info(f"Fetched NSE holidays for {year} from official API.")
+                    # Save/update CSV cache
+                    try:
+                        csv_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "util_data", "nse_holidays.csv")
+                        df_cache = pd.DataFrame([{"year": year, "date": dt.strftime("%Y-%m-%d"), "description": entry.get('description', '')} for entry in data.get("CM", []) for dt in [datetime.strptime(entry['tradingDate'], "%d-%b-%Y").date()]])
+                        if not df_cache.empty:
+                            if os.path.exists(csv_path):
+                                df_cache.to_csv(csv_path, mode='a', header=False, index=False)
+                            else:
+                                df_cache.to_csv(csv_path, mode='w', header=True, index=False)
+                    except Exception as e:
+                        logger.warning(f"Could not update holiday CSV cache: {e}")
+                    return holidays
         except Exception as e:
-            logger.error(f"Error fetching historical data for {symbol}: {e}")
-            return pd.DataFrame()
+            logger.warning(f"Could not fetch NSE holidays for {year} from API: {e}")
+
+        # 2. Fallback: Try HTML calendar page
+        try:
+            html_url = f"https://www.nseindia.com/products-services/equity-market-timings-holidays"  # This page lists holidays for current year
+            resp = requests.get(html_url, headers=headers, timeout=10)
+            if resp.status_code == 200:
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(resp.text, 'html.parser')
+                # Find the table for the correct year
+                tables = soup.find_all('table')
+                found = False
+                for table in tables:
+                    if str(year) in table.text:
+                        found = True
+                        for row in table.find_all('tr'):
+                            cols = row.find_all('td')
+                            if len(cols) >= 2:
+                                date_str = cols[0].get_text(strip=True)
+                                desc = cols[1].get_text(strip=True) if len(cols) > 1 else ''
+                                # Try to parse date (formats: 'January 26, 2025' or '26-Jan-2025')
+                                for fmt in ("%B %d, %Y", "%d-%b-%Y", "%d/%m/%Y"):
+                                    try:
+                                        dt = datetime.strptime(date_str, fmt).date()
+                                        holidays.add(dt)
+                                        break
+                                    except Exception:
+                                        continue
+                        break
+                if holidays:
+                    logger.info(f"Fetched NSE holidays for {year} by scraping HTML calendar page.")
+                    # Save/update CSV cache
+                    try:
+                        csv_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "util_data", "nse_holidays.csv")
+                        df_cache = pd.DataFrame([{"year": year, "date": dt.strftime("%Y-%m-%d"), "description": desc} for dt in holidays])
+                        if not df_cache.empty:
+                            if os.path.exists(csv_path):
+                                df_cache.to_csv(csv_path, mode='a', header=False, index=False)
+                            else:
+                                df_cache.to_csv(csv_path, mode='w', header=True, index=False)
+                    except Exception as e:
+                        logger.warning(f"Could not update holiday CSV cache: {e}")
+                    return holidays
+                if not found:
+                    logger.warning(f"Could not find holiday table for {year} in NSE HTML page.")
+        except Exception as e:
+            logger.warning(f"Could not fetch NSE holidays for {year} from HTML page: {e}")
+
+        # 3. Fallback: Try CSV cache
+        try:
+            csv_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "util_data", "nse_holidays.csv")
+            if os.path.exists(csv_path):
+                df = pd.read_csv(csv_path)
+                df_year = df[df['year'] == int(year)]
+                for _, row in df_year.iterrows():
+                    try:
+                        dt = datetime.strptime(str(row['date']), "%Y-%m-%d").date()
+                        holidays.add(dt)
+                    except Exception:
+                        continue
+                if holidays:
+                    logger.info(f"Loaded NSE holidays for {year} from CSV cache.")
+                    return holidays
+        except Exception as e:
+            logger.warning(f"Could not load NSE holidays for {year} from CSV cache: {e}")
+
+        # 4. Final fallback: static set for common years (update as needed)
+        static_holidays = {
+            2024: ["2024-01-01", "2024-01-26", "2024-03-08", "2024-03-25", "2024-04-11", "2024-04-17", "2024-05-01", "2024-08-15", "2024-10-02", "2024-11-01", "2024-11-15", "2024-12-25"],
+            2025: ["2025-01-01", "2025-01-26", "2025-03-14", "2025-04-14", "2025-04-18", "2025-05-01", "2025-08-15", "2025-10-02", "2025-10-31", "2025-11-05", "2025-12-25"],
+            2026: ["2026-01-01", "2026-01-26", "2026-03-03", "2026-04-03", "2026-04-06", "2026-05-01", "2026-08-15", "2026-10-02", "2026-10-20", "2026-11-24", "2026-12-25"]
+        }
+        
+        if year in static_holidays:
+            logger.warning(f"Falling back to static holiday list for {year}. Please update from NSE official source for accuracy.")
+            return set(pd.to_datetime(static_holidays[year]).date)
+        else:
+            # Use 2025 as default fallback
+            logger.warning(f"No static holiday data for {year}. Using 2025 holidays as fallback.")
+            return set(pd.to_datetime(static_holidays[2025]).date)
+
+    # --- SQLite-based rate limiting state for historical data API ---
+    _hist_api_rate_db = 'hist_api_rate_state.sqlite'
+
+    @staticmethod
+    def _init_rate_db():
+        import sqlite3
+        conn = sqlite3.connect(DataCollector._hist_api_rate_db, timeout=30)
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS api_calls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            call_time REAL NOT NULL
+        )''')
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def _acquire_file_lock(lockfile):
+        import os
+        import time
+        if os.name == 'nt':
+            import msvcrt
+            lock = open(lockfile, 'a+')
+            while True:
+                try:
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    time.sleep(0.05)
+            return lock
+        else:
+            import fcntl
+            lock = open(lockfile, 'a+')
+            while True:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    time.sleep(0.05)
+            return lock
+
+    @staticmethod
+    def _release_file_lock(lock):
+        import os
+        if os.name == 'nt':
+            import msvcrt
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock, fcntl.LOCK_UN)
+        lock.close()
+
+    @classmethod
+    def _load_rate_state(cls):
+        import json, os
+        if not os.path.exists(cls._hist_api_rate_file):
+            return {'sec': [], 'min': [], 'day': []}
+        try:
+            with open(cls._hist_api_rate_file, 'r') as f:
+                return json.load(f)
+        except Exception:
+            return {'sec': [], 'min': [], 'day': []}
+
+    @classmethod
+    def _save_rate_state(cls, state):
+        import json
+        with open(cls._hist_api_rate_file, 'w') as f:
+            json.dump(state, f)
 
     def _interval_to_pandas_freq(self, interval):
         # Helper to convert API interval to pandas frequency string
@@ -227,6 +297,12 @@ class DataCollector:
 
     """Enhanced data collection class with rate limiting"""
     def __init__(self, config):
+        # If already initialized (singleton), skip initialization
+        if hasattr(self, '_initialized') and self._initialized:
+            print("[DEBUG] DataCollector.__init__() - already initialized, skipping")
+            logger.info("[DEBUG] DataCollector.__init__() - already initialized, skipping")
+            return
+            
         print("[DEBUG] DataCollector.__init__() - start")
         logger.info("[DEBUG] DataCollector.__init__() - start")
         # Commented out Streamlit debug logs (st is not defined)
@@ -250,6 +326,7 @@ class DataCollector:
         # --- LIVE QUOTES PATCH ---
         self._live_quotes = {}  # symbol -> latest tick dict
         self._live_quotes_lock = threading.Lock()
+        self._websocket_lock = threading.Lock()  # Lock for WebSocket operations
         # Rate limiting (configurable)
         rate_limit_cfg = config.get('api', {}).get('rate_limit', {})
         rate = rate_limit_cfg.get('rate', 3)
@@ -259,27 +336,54 @@ class DataCollector:
         #     st.info("[DEBUG] DataCollector.__init__() - before _initialize_api")
         # except Exception:
         #     pass
-        # Initialize API
-        self._initialize_api()
+        # Initialize API with timeout protection
+        logger.info("Initializing Angel One API connection...")
+        try:
+            self._initialize_api()
+            logger.info("Angel One API initialized successfully")
+        except Exception as e:
+            logger.warning(f"Angel One API initialization failed: {e}")
+            logger.warning("Continuing without API connection - some features may be limited")
+            self.angel_api = None
         # try:
         #     st.info("[DEBUG] DataCollector.__init__() - after _initialize_api, before _initialize_token_mapping")
         # except Exception:
         #     pass
-        self._initialize_token_mapping()
+        
+        # Initialize token mapping with timeout protection
+        logger.info("Initializing token mapping...")
+        try:
+            self._initialize_token_mapping()
+            logger.info("Token mapping initialized successfully")
+        except Exception as e:
+            logger.warning(f"Token mapping initialization failed: {e}")
+            logger.warning("Continuing with limited token mapping - some symbols may not work")
+            # Set up basic symbol mappings as fallback
+            self.symbol_token_map = {}
+            self.token_symbol_map = {}
         # try:
         #     st.info("[DEBUG] DataCollector.__init__() - after _initialize_token_mapping, before _initialize_websocket")
         # except Exception:
         #     pass
         try:
-            self._initialize_websocket()
+            # Make websocket initialization completely optional and deferred
+            logger.info("Deferring websocket initialization to after main constructor...")
+            # We'll initialize websocket later via a separate method call
+            self.websocket = None
+            logger.info("Websocket will be initialized after DataCollector constructor completes")
         except Exception as e:
-            # Surface websocket init errors to logs only
-            logger.error(f"[ERROR] DataCollector.__init__() - _initialize_websocket failed: {e}")
-            raise
+            # Don't let websocket errors block the entire initialization
+            logger.warning(f"WebSocket initialization deferred due to error: {e}")
+            self.websocket = None
         # try:
         #     st.info("[DEBUG] DataCollector.__init__() - end of constructor")
         # except Exception:
         #     pass
+        
+        # Mark as initialized
+        self._initialized = True
+        print("[DEBUG] DataCollector.__init__() - completed successfully")
+        logger.info("[DEBUG] DataCollector.__init__() - completed successfully")
         
     @staticmethod
     def validate_config(config):
@@ -308,8 +412,8 @@ class DataCollector:
         """Initialize Angel One API connection with enhanced error handling and session management"""
         try:
             angel_config = self.config['apis']['angel_one']
-            max_retries = 5
-            retry_delay = 10
+            max_retries = 3  # Increased from 2 for better reliability
+            retry_delay = 5  # Increased from 3 for network stability
             retry_count = 0
             last_error = None
             
@@ -317,15 +421,15 @@ class DataCollector:
                 try:
                     logger.info(f"Attempting API connection (attempt {retry_count + 1}/{max_retries})")
                     
-                    # Initialize session with better timeout and retry settings
+                    # Initialize session with more relaxed timeout settings
                     session = requests.Session()
                     adapter = requests.adapters.HTTPAdapter(
-                        max_retries=3,
-                        pool_connections=10,
-                        pool_maxsize=10
+                        max_retries=3,  # Increased from 2
+                        pool_connections=10,  # Increased from 5
+                        pool_maxsize=10  # Increased from 5
                     )
                     session.mount('https://', adapter)
-                    session.timeout = (30, 60)  # (connect timeout, read timeout)
+                    session.timeout = (30, 60)  # Increased timeouts: (connect=30s, read=60s)
                     
                     # Initialize SmartConnect
                     self.angel_api = SmartConnect(api_key=angel_config['api_key'])
@@ -337,7 +441,8 @@ class DataCollector:
                     current_totp = totp.now()
                     logger.debug("Generated TOTP successfully")
                     
-                    # Authenticate
+                    # Authenticate with timeout wrapper
+                    logger.info("Starting authentication with Angel One API...")
                     data = self.angel_api.generateSession(
                         angel_config['client_id'],
                         angel_config['mpin'],
@@ -354,6 +459,10 @@ class DataCollector:
                         if profile.get('status'):
                             logger.info(f"Successfully authenticated with Angel One API")
                             logger.info(f"Successfully retrieved user profile for {profile['data'].get('name', 'Unknown')}")
+                            
+                            # Set api_client reference for get_live_quote method
+                            self.api_client = self.angel_api
+                            
                             return
                     
                     retry_count += 1
@@ -454,10 +563,10 @@ class DataCollector:
             mapped_symbols = [self.symbol_mappings.get(s, s) for s in mapped_symbols]
             mapped_symbols = list(dict.fromkeys(mapped_symbols))
             instrument_url = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
-            for attempt in range(3):
+            for attempt in range(2):  # Reduced attempts from 3 to 2
                 try:
-                    logger.info(f"Downloading instrument file (attempt {attempt + 1}/3)...")
-                    response = requests.get(instrument_url, timeout=30)
+                    logger.info(f"Downloading instrument file (attempt {attempt + 1}/2)...")
+                    response = requests.get(instrument_url, timeout=10)  # Reduced from 30 to 10 seconds
                     if response.status_code == 200:
                         data = response.json()
                         logger.info("Successfully downloaded instrument file")
@@ -527,7 +636,7 @@ class DataCollector:
                         },
                         'mode': self.config.get('data', {}).get('websocket', {}).get('mode', 'QUOTE')
                     }
-                    self.websocket = MarketDataWebSocket(
+                    self.websocket = get_websocket_instance(
                         auth_token=self.auth_token,
                         api_key=angel_config['api_key'],
                         client_code=angel_config['client_id'],
@@ -552,7 +661,23 @@ class DataCollector:
                         logger.warning("MarketDataWebSocket does not support add_message_callback; only tick callbacks will be logged.")
 
                     logger.info(f"Initiating WebSocket connection (attempt {attempt}/{max_retries})...")
-                    self.websocket.connect()
+                    logger.info(f"[DEBUG] About to call self.websocket.connect()")
+                    connection_result = self.websocket.connect()
+                    logger.info(f"[DEBUG] WebSocket.connect() returned: {connection_result}")
+                    
+                    # Wait a moment for connection to stabilize
+                    time.sleep(2)
+                    logger.info(f"[DEBUG] WebSocket state after connect: connected={self.websocket.is_connected}, state={self.websocket.connection_state}")
+                    
+                    if not connection_result:
+                        logger.error(f"[DEBUG] WebSocket connection returned False")
+                        continue  # Try next attempt
+                        
+                    if not self.websocket.is_connected:
+                        logger.error(f"[DEBUG] WebSocket connection failed, state: {self.websocket.connection_state}")
+                        continue  # Try next attempt
+                    
+                    logger.info(f"[DEBUG] WebSocket connection successful, proceeding to subscription")
                     # --- PATCH: Aggressive diagnostics for live tick debugging ---
                     symbol_tokens = list(self.symbol_token_map.values())
                     logger.info(f"[PATCH] Subscribing to tokens for watchlist: {symbol_tokens}")
@@ -610,7 +735,28 @@ class DataCollector:
         t = threading.Thread(target=websocket_connect_and_subscribe, daemon=True)
         t.start()
         logger.info("WebSocket connection started in background thread (non-blocking)")
+    
+    def ensure_websocket_connected(self):
+        """Initialize websocket if not already connected. Call this when websocket is actually needed."""
+        with self._websocket_lock:
+            if self.websocket is None:
+                logger.info("WebSocket not initialized, starting websocket connection...")
+                try:
+                    self._initialize_websocket()
+                    logger.info("WebSocket initialization started")
+                except Exception as e:
+                    logger.warning(f"Failed to initialize websocket: {e}")
+            elif hasattr(self.websocket, 'is_connected') and not self.websocket.is_connected:
+                logger.info("WebSocket exists but not connected, reconnecting...")
+                try:
+                    self._initialize_websocket()
+                    logger.info("WebSocket reconnection started")
+                except Exception as e:
+                    logger.warning(f"Failed to reconnect websocket: {e}")
+            else:
+                logger.debug("WebSocket already initialized and connected")
             
+    @with_rate_limit(max_retries=3, initial_delay=1.0)
     def _on_market_data(self, tick_data: Dict[str, Any]):
         """Handle incoming market data ticks"""
         try:
@@ -789,6 +935,9 @@ class DataCollector:
                         all_data.append(df)
                 except Exception as e:
                     logger.warning(f"Error fetching data for {sym}: {e}")
+                # Add a 2-second delay between symbol fetches to ensure no rate limit is exceeded
+                import time
+                time.sleep(2.0)
             
             if not all_data:
                 logger.warning("No data available for any configured symbols")
@@ -806,34 +955,83 @@ class DataCollector:
     def get_historical_data(self, symbol, days=10, interval='ONE_DAY'):
         import time
         from datetime import datetime, timedelta
-        # --- Rate limit constants (official) ---
-        HIST_API_LIMIT_SEC = 3
-        HIST_API_LIMIT_MIN = 180
-        HIST_API_LIMIT_HR = 5000
+        # --- Rate limit constants (official, strict compliance) ---
+        HIST_API_LIMIT_SEC = 3      # 3 requests per second
+        HIST_API_LIMIT_MIN = 180    # 180 requests per minute
+        HIST_API_LIMIT_DAY = 5000   # 5000 requests per day
 
         def _rate_limit_wait():
+            import time
+            import sqlite3
+            DataCollector._init_rate_db()
             now = time.time()
-            with self._hist_api_lock:
+            HIST_API_LIMIT_SEC = 3
+            HIST_API_LIMIT_MIN = 180
+            HIST_API_LIMIT_DAY = 5000
+            while True:
+                conn = sqlite3.connect(DataCollector._hist_api_rate_db, timeout=30)
+                c = conn.cursor()
                 # Clean up old timestamps
-                self._hist_api_calls_sec = [t for t in self._hist_api_calls_sec if t > now - 1]
-                self._hist_api_calls_min = [t for t in self._hist_api_calls_min if t > now - 60]
-                self._hist_api_calls_hr = [t for t in self._hist_api_calls_hr if t > now - 3600]
-                # If any limit exceeded, calculate wait time
+                c.execute('DELETE FROM api_calls WHERE call_time < ?', (now - 86400,))
+                conn.commit()
+                # Count calls in each window
+                c.execute('SELECT COUNT(*) FROM api_calls WHERE call_time > ?', (now - 1,))
+                sec_count = c.fetchone()[0]
+                c.execute('SELECT COUNT(*) FROM api_calls WHERE call_time > ?', (now - 60,))
+                min_count = c.fetchone()[0]
+                c.execute('SELECT COUNT(*) FROM api_calls WHERE call_time > ?', (now - 86400,))
+                day_count = c.fetchone()[0]
                 wait_times = []
-                if len(self._hist_api_calls_sec) >= HIST_API_LIMIT_SEC:
-                    wait_times.append(1 - (now - self._hist_api_calls_sec[0]))
-                if len(self._hist_api_calls_min) >= HIST_API_LIMIT_MIN:
-                    wait_times.append(60 - (now - self._hist_api_calls_min[0]))
-                if len(self._hist_api_calls_hr) >= HIST_API_LIMIT_HR:
-                    wait_times.append(3600 - (now - self._hist_api_calls_hr[0]))
+                if sec_count >= HIST_API_LIMIT_SEC:
+                    c.execute('SELECT MIN(call_time) FROM api_calls WHERE call_time > ?', (now - 1,))
+                    oldest = c.fetchone()[0]
+                    wait_times.append(1 - (now - oldest))
+                if min_count >= HIST_API_LIMIT_MIN:
+                    c.execute('SELECT MIN(call_time) FROM api_calls WHERE call_time > ?', (now - 60,))
+                    oldest = c.fetchone()[0]
+                    wait_times.append(60 - (now - oldest))
+                if day_count >= HIST_API_LIMIT_DAY:
+                    c.execute('SELECT MIN(call_time) FROM api_calls WHERE call_time > ?', (now - 86400,))
+                    oldest = c.fetchone()[0]
+                    wait_times.append(86400 - (now - oldest))
                 if wait_times:
                     wait_time = max(wait_times)
-                    logger.warning(f"[RATE LIMIT] Waiting {wait_time:.2f}s to comply with Angel One historical data API limits.")
-                    time.sleep(max(wait_time, 0.01))
+                    if wait_time > 0:
+                        logger.warning(f"[RATE LIMIT][SQLITE] Strict wait {wait_time:.2f}s to comply with Angel One historical data API limits (rolling window, SQLite, process-safe).")
+                        conn.close()
+                        time.sleep(wait_time)
+                        now = time.time()
+                        continue
                 # Register this call
-                self._hist_api_calls_sec.append(now)
-                self._hist_api_calls_min.append(now)
-                self._hist_api_calls_hr.append(now)
+                c.execute('INSERT INTO api_calls (call_time) VALUES (?)', (now,))
+                conn.commit()
+                conn.close()
+                break
+
+        # Helper to detect rate limit errors in API response
+        def _is_rate_limit_error(response):
+            # Only treat as rate limit error if status is False and errorcode/message matches
+            if not response:
+                return False
+            if isinstance(response, dict):
+                if response.get('status') is True:
+                    return False
+                errorcode = str(response.get('errorcode', '')).lower()
+                message = str(response.get('message', '')).lower()
+                rate_limit_keywords = [
+                    'access rate',
+                    'rate limit',
+                    'too many requests',
+                    'exceed',
+                    'try after sometime',
+                    'too frequent',
+                    '429',
+                    'ab1004',  # Angel One errorcode for rate limit
+                ]
+                if errorcode in rate_limit_keywords:
+                    return True
+                return any(keyword in message for keyword in rate_limit_keywords)
+            return False
 
         """
         Fetch historical OHLCV data for a symbol, with candlestick pattern detection.
@@ -861,7 +1059,8 @@ class DataCollector:
             else:
                 start_str = start_date.strftime('%Y-%m-%d %H:%M')
                 end_str = end_date.strftime('%Y-%m-%d %H:%M')
-            logger.info(f"Requesting historical data for {symbol} from {start_str} to {end_str} (interval: {interval})")
+            logger.info(f"[DATA FETCH] Requesting historical data for {symbol} from {start_str} to {end_str} (interval: {interval}, days: {days})")
+            logger.info(f"[DATA FETCH] fromdate={start_str}, todate={end_str}, symbol={symbol}, days={days}")
             token = self.symbol_token_map.get(symbol)
             if token is None:
                 token = self.symbol_token_map.get(symbol.replace('.NS', ''))
@@ -869,6 +1068,7 @@ class DataCollector:
                 token = self.symbol_token_map.get(symbol.replace('.NS', '-EQ'))
             if token is None:
                 logger.error(f"No token found for symbol {symbol} (tried direct, base, and -EQ)")
+                logger.error(f"Available symbol_token_map keys: {list(self.symbol_token_map.keys())[:20]} ... (total: {len(self.symbol_token_map)})")
                 return pd.DataFrame()
             params = {
                 "exchange": "NSE",
@@ -879,25 +1079,73 @@ class DataCollector:
             }
             max_retries = 5
             retry_wait = self.config.get('api_rate_limit_wait', 2)
+            # Fetch holidays for the period
+            holidays = set()
+            try:
+                holidays = self.fetch_nse_holidays(end_date.year)
+            except Exception as e:
+                logger.warning(f"Could not fetch holidays for diagnostics: {e}")
             for attempt in range(max_retries):
                 _rate_limit_wait()
                 response = self.angel_api.getCandleData(params)
-                if response and 'data' in response:
+                # Log raw API response for diagnostics
+                logger.debug(f"Raw API response for {symbol} (attempt {attempt+1}): {response}")
+                # Only check for rate limit error if status is False or missing
+                if not (isinstance(response, dict) and response.get('status') is True):
+                    if _is_rate_limit_error(response):
+                        logger.warning(f"[RATE LIMIT] Detected rate limit error for {symbol} (attempt {attempt+1}/{max_retries}). Response: {response}")
+                        wait_time = retry_wait * (2 ** attempt)  # Exponential backoff
+                        logger.warning(f"[RATE LIMIT] Waiting {wait_time:.2f}s before retrying...")
+                        time.sleep(wait_time)
+                        continue
+                # Check if response is successful AND contains data
+                if response and isinstance(response, dict) and response.get('status') is True and 'data' in response:
                     candles = response['data']
+                    # DIAGNOSTIC: Log the first few rows of candles and their lengths
+                    logger.debug(f"[DIAGNOSTIC] {symbol}: First 3 raw 'candles' rows: {candles[:3]}")
+                    if candles and isinstance(candles, list):
+                        logger.debug(f"[DIAGNOSTIC] {symbol}: Lengths of first 3 'candles' rows: {[len(row) if isinstance(row, (list, tuple)) else type(row) for row in candles[:3]]}")
+                    else:
+                        logger.debug(f"[DIAGNOSTIC] {symbol}: 'candles' is not a list or is empty: {type(candles)}")
                     df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    logger.debug(f"[DIAGNOSTIC] {symbol}: DataFrame columns after construction: {list(df.columns)}")
+                    logger.debug(f"[DIAGNOSTIC] {symbol}: DataFrame shape after construction: {df.shape}")
+                    logger.debug(f"[DIAGNOSTIC] {symbol}: DataFrame head after construction:\n{df.head(3)}")
                     df['timestamp'] = pd.to_datetime(df['timestamp'])
                     # --- DIAGNOSTIC: OHLCV completeness check ---
-                    expected_rows = self._calculate_expected_rows(start_date, end_date, interval)
+                    # Calculate expected trading days: business days minus holidays (date only, no tz)
+                    all_bdays = pd.date_range(start=start_date, end=end_date, freq='B')
+                    expected_trading_days = [d.date() for d in all_bdays if d.date() not in holidays]
+                    expected_rows = len(expected_trading_days)
                     actual_rows = len(df)
+                    missing_trading_days = []
                     missing_timestamps = []
                     if 'timestamp' in df.columns:
                         df_sorted = df.sort_values('timestamp')
-                        all_expected = pd.date_range(start=start_date, end=end_date, freq=self._interval_to_pandas_freq(interval))
-                        actual_set = set(pd.to_datetime(df_sorted['timestamp']))
-                        missing_timestamps = [ts for ts in all_expected if ts not in actual_set]
-                    logger.info(f"[DIAGNOSTIC] {symbol}: Expected rows={expected_rows}, Actual rows={actual_rows}, Missing timestamps={len(missing_timestamps)}")
-                    if missing_timestamps:
-                        logger.warning(f"[DIAGNOSTIC] {symbol}: Missing timestamps: {missing_timestamps[:10]}{'...' if len(missing_timestamps)>10 else ''}")
+                        # Convert all timestamps to date (no tz, no time)
+                        actual_dates = set(pd.to_datetime(df_sorted['timestamp']).dt.date)
+                        missing_trading_days = [d for d in expected_trading_days if d not in actual_dates]
+                        # Also log missing timestamps (full timestamp, not just date)
+                        expected_dates_set = set(expected_trading_days)
+                        # Find all expected trading days that are missing in actual_dates
+                        # For each missing trading day, check if any timestamp in df matches that date
+                        for missing_day in missing_trading_days:
+                            # Find all timestamps in the expected range for this day (should be one per day for daily data)
+                            # If none in df, add the date to missing_timestamps
+                            if not any(ts.date() == missing_day for ts in pd.to_datetime(df_sorted['timestamp'])):
+                                missing_timestamps.append(missing_day)
+                    logger.info(f"[DIAGNOSTIC] {symbol}: Expected trading days={expected_rows}, Actual rows={actual_rows}, Missing trading days={len(missing_trading_days)}")
+                    if missing_trading_days:
+                        logger.warning(f"[DIAGNOSTIC] {symbol}: Missing trading days (date only): {missing_trading_days}")
+                        logger.warning(f"[DIAGNOSTIC] {symbol}: Missing timestamps (full, for those days): {[str(d) for d in missing_timestamps]}")
+                        # Log cURL command for failed validation
+                        curl_cmd = (
+                            f"curl -X POST 'https://apiconnect.angelone.in/rest/secure/angelbroking/historical/v1/getCandleData' "
+                            f"-H 'Authorization: Bearer <TOKEN>' "
+                            f"-H 'Content-Type: application/json' "
+                            f"-d '{{\"exchange\":\"NSE\",\"symboltoken\":\"{token}\",\"interval\":\"{interval}\",\"fromdate\":\"{start_str}\",\"todate\":\"{end_str}\"}}'"
+                        )
+                        logger.warning(f"[DIAGNOSTIC] {symbol}: cURL for failed validation: {curl_cmd}")
                     if actual_rows < expected_rows:
                         logger.warning(f"[DIAGNOSTIC] {symbol}: Fetched fewer rows than expected. Possible API/data issue.")
                     for col in ['open', 'high', 'low', 'close', 'volume']:
@@ -907,11 +1155,13 @@ class DataCollector:
                     missing_cols = [col for col in required_cols if col not in df.columns]
                     if missing_cols:
                         logger.error(f"Missing columns {missing_cols} in historical data for {symbol}. Failing fetch.")
+                        logger.error(f"Raw API response for {symbol} (missing columns): {response}")
                         return pd.DataFrame()
                     if df.isnull().any().any():
                         logger.warning(f"Null values found in historical data for {symbol}. Shape: {df.shape}")
                     if len(df) < 60:
                         logger.error(f"Insufficient data points ({len(df)}) for {symbol}. Failing fetch.")
+                        logger.error(f"Raw API response for {symbol} (insufficient data): {response}")
                         return pd.DataFrame()
                     df = self.detect_candlestick_patterns(df)
                     if 'pattern' not in df.columns:
@@ -921,16 +1171,101 @@ class DataCollector:
                         logger.info(f"Pattern detection completed for {symbol}. Example patterns: {df['pattern'].value_counts().to_dict()}")
                     return df
                 else:
-                    if response and b'access rate' in str(response).lower():
-                        logger.warning(f"Rate limit exceeded for {symbol}. Waiting {retry_wait} seconds before retry.")
-                        time.sleep(retry_wait)
-                    else:
-                        logger.error(f"No data returned for {symbol} from API. Attempt {attempt+1}/{max_retries}")
-                        time.sleep(retry_wait)
+                    logger.error(f"No data returned for {symbol} from API. Attempt {attempt+1}/{max_retries}. Response: {response}")
+                    logger.error(f"Raw API response for {symbol} (no data): {response}")
+                    # Log cURL command for failed API call
+                    curl_cmd = (
+                        f"curl -X POST 'https://apiconnect.angelone.in/rest/secure/angelbroking/historical/v1/getCandleData' "
+                        f"-H 'Authorization: Bearer <TOKEN>' "
+                        f"-H 'Content-Type: application/json' "
+                        f"-d '{{\"exchange\":\"NSE\",\"symboltoken\":\"{token}\",\"interval\":\"{interval}\",\"fromdate\":\"{start_str}\",\"todate\":\"{end_str}\"}}'"
+                    )
+                    logger.warning(f"[DIAGNOSTIC] {symbol}: cURL for failed API call: {curl_cmd}")
+                    time.sleep(retry_wait)
             logger.error(f"Failed to fetch historical data for {symbol} after {max_retries} retries.")
             return pd.DataFrame()
         except Exception as e:
-            logger.error(f"Error fetching historical data for {symbol}: {e}")
+            error_msg = str(e)
+            if "Couldn't parse the JSON response" in error_msg:
+                logger.warning(f"Angel One API returned empty response for {symbol} - likely due to market load or rate limiting. Using fallback data.")
+            else:
+                logger.error(f"Error fetching historical data for {symbol}: {e}")
+            
+            # Try to return cached or fallback data
+            try:
+                fallback_data = self._get_fallback_historical_data(symbol, days)
+                if not fallback_data.empty:
+                    logger.info(f"Using fallback historical data for {symbol} with {len(fallback_data)} rows")
+                    return fallback_data
+            except Exception as fallback_error:
+                logger.debug(f"Fallback data fetch failed for {symbol}: {fallback_error}")
+                
+            return pd.DataFrame()
+
+    def _get_fallback_historical_data(self, symbol: str, days: int = 10) -> pd.DataFrame:
+        """Get fallback historical data from CSV file when API fails"""
+        try:
+            # Try to load from training data CSV
+            csv_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'data', 'swing_training_data.csv')
+            if os.path.exists(csv_path):
+                df = pd.read_csv(csv_path)
+                
+                # Filter for the requested symbol
+                if 'symbol' in df.columns:
+                    symbol_data = df[df['symbol'] == symbol].copy()
+                elif 'Symbol' in df.columns:
+                    symbol_data = df[df['Symbol'] == symbol].copy()
+                else:
+                    # If no symbol column, assume all data is for one symbol
+                    symbol_data = df.copy()
+                
+                if not symbol_data.empty:
+                    # Ensure we have the required columns
+                    required_cols = ['open', 'high', 'low', 'close', 'volume']
+                    
+                    # Map column names if necessary
+                    column_mapping = {
+                        'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume',
+                        'OPEN': 'open', 'HIGH': 'high', 'LOW': 'low', 'CLOSE': 'close', 'VOLUME': 'volume'
+                    }
+                    
+                    for old_col, new_col in column_mapping.items():
+                        if old_col in symbol_data.columns:
+                            symbol_data = symbol_data.rename(columns={old_col: new_col})
+                    
+                    # Check if we have all required columns
+                    missing_cols = [col for col in required_cols if col not in symbol_data.columns]
+                    if not missing_cols:
+                        # Get the most recent data
+                        if 'timestamp' in symbol_data.columns:
+                            symbol_data['timestamp'] = pd.to_datetime(symbol_data['timestamp'])
+                            symbol_data = symbol_data.sort_values('timestamp').tail(days)
+                        elif 'date' in symbol_data.columns:
+                            symbol_data['timestamp'] = pd.to_datetime(symbol_data['date'])
+                            symbol_data = symbol_data.sort_values('timestamp').tail(days)
+                        else:
+                            # Use the last N rows
+                            symbol_data = symbol_data.tail(days)
+                            symbol_data['timestamp'] = pd.date_range(
+                                end=datetime.now(), periods=len(symbol_data), freq='D'
+                            )
+                        
+                        # Ensure numeric columns
+                        for col in required_cols:
+                            symbol_data[col] = pd.to_numeric(symbol_data[col], errors='coerce')
+                        
+                        # Add pattern column if missing
+                        if 'pattern' not in symbol_data.columns:
+                            symbol_data['pattern'] = 'None'
+                        
+                        logger.info(f"Loaded fallback historical data for {symbol}: {len(symbol_data)} rows from CSV")
+                        return symbol_data[['timestamp'] + required_cols + ['pattern']]
+            
+            logger.debug(f"No fallback historical data available for {symbol}")
+            return pd.DataFrame()
+            
+        except Exception as e:
+            logger.debug(f"Error loading fallback historical data for {symbol}: {e}")
             return pd.DataFrame()
 
     def _interval_to_pandas_freq(self, interval):
@@ -1514,8 +1849,6 @@ class DataCollector:
             'CDLLONGLEGGEDDOJI': talib.CDLLONGLEGGEDDOJI,
             'CDLLONGLINE': talib.CDLLONGLINE,
             'CDLMARUBOZU': talib.CDLMARUBOZU,
-            'CDLMATCHINGLOW': talib.CDLHMATCHINGLOW,
-            'CDLMATHOLD': talib.CDLHMATHOLD,
             'CDLMORNINGDOJISTAR': talib.CDLMORNINGDOJISTAR,
             'CDLMORNINGSTAR': talib.CDLMORNINGSTAR,
             'CDLONNECK': talib.CDLONNECK,
@@ -1570,3 +1903,336 @@ class DataCollector:
         pattern_counts = df['pattern'].value_counts().to_dict()
         logger.info(f"Candlestick pattern detection summary: {pattern_counts}")
         return df
+
+    def get_live_quote(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Get live quote for a symbol ONLY from WebSocket data - no API fallbacks"""
+        logger.info(f"[DEBUG] get_live_quote called for {symbol}")
+        try:
+            # Check if market is open for context (but we still only use WebSocket data)
+            current_time = datetime.now()
+            market_open_time = current_time.replace(hour=9, minute=15, second=0, microsecond=0)
+            market_close_time = current_time.replace(hour=15, minute=30, second=0, microsecond=0)
+            is_market_open = market_open_time <= current_time <= market_close_time
+            
+            logger.info(f"[DEBUG] Market open status: {is_market_open}")
+            
+            # Ensure WebSocket is connected
+            if not hasattr(self, 'websocket') or not self.websocket:
+                logger.info(f"[DEBUG] WebSocket not available, attempting to initialize...")
+                try:
+                    self.ensure_websocket_connected()
+                except Exception as ws_error:
+                    logger.error(f"[DEBUG] WebSocket initialization failed: {ws_error}")
+                    return self._return_no_websocket_data(symbol, is_market_open)
+            
+            # ONLY use WebSocket data - check our internal live quotes cache
+            if hasattr(self, '_live_quotes') and hasattr(self, '_live_quotes_lock'):
+                with self._live_quotes_lock:
+                    live_data = self._live_quotes.get(symbol)
+                    logger.info(f"[DEBUG] WebSocket live_quotes for {symbol}: {live_data}")
+                    
+                    if live_data and live_data.get('ltp', 0) > 0:
+                        logger.info(f"[DEBUG] Using WebSocket data for {symbol}: ₹{live_data.get('ltp')}")
+                        
+                        # Calculate change and change_percent if we have previous close price
+                        ltp = float(live_data.get('ltp', 0))
+                        close_price = float(live_data.get('close', 0))
+                        change = ltp - close_price if close_price > 0 else 0
+                        change_percent = (change / close_price * 100) if close_price > 0 else 0
+                        
+                        return {
+                            'symbol': symbol,
+                            'ltp': ltp,
+                            'change': change,
+                            'change_percent': change_percent,
+                            'volume': int(live_data.get('volume', 0)),
+                            'bid_price': float(live_data.get('best_bid_price', 0)),
+                            'ask_price': float(live_data.get('best_ask_price', 0)),
+                            'open': float(live_data.get('open', 0)),
+                            'high': float(live_data.get('high', 0)),
+                            'low': float(live_data.get('low', 0)),
+                            'close': close_price,
+                            'timestamp': live_data.get('timestamp', datetime.now()),
+                            'source': 'websocket_live' if is_market_open else 'websocket_ltp',
+                            'market_status': 'open' if is_market_open else 'closed'
+                        }
+            
+            # Check WebSocket's live_feed as backup WebSocket source
+            if hasattr(self.websocket, 'live_feed'):
+                # Get token for the symbol
+                token = self._get_token_for_symbol(symbol)
+                logger.info(f"[DEBUG] Token for {symbol}: {token}")
+                
+                if token:
+                    live_data = self.websocket.live_feed.get(str(token))
+                    logger.info(f"[DEBUG] WebSocket live_feed for token {token}: {live_data}")
+                    
+                    if live_data and live_data.get('ltp', 0) > 0:
+                        logger.info(f"[DEBUG] Using WebSocket live_feed data for {symbol}: ₹{live_data.get('ltp')}")
+                        
+                        ltp = float(live_data.get('ltp', 0))
+                        close_price = float(live_data.get('close', 0))
+                        change = ltp - close_price if close_price > 0 else 0
+                        change_percent = (change / close_price * 100) if close_price > 0 else 0
+                        
+                        return {
+                            'symbol': symbol,
+                            'ltp': ltp,
+                            'change': change,
+                            'change_percent': change_percent,
+                            'volume': int(live_data.get('volume', 0)),
+                            'bid_price': float(live_data.get('best_bid_price', 0)),
+                            'ask_price': float(live_data.get('best_ask_price', 0)),
+                            'open': float(live_data.get('open', 0)),
+                            'high': float(live_data.get('high', 0)),
+                            'low': float(live_data.get('low', 0)),
+                            'close': close_price,
+                            'timestamp': live_data.get('timestamp', datetime.now()),
+                            'source': 'websocket_live' if is_market_open else 'websocket_ltp',
+                            'market_status': 'open' if is_market_open else 'closed'
+                        }
+            
+            # NO FALLBACKS - if no WebSocket data, return no data
+            logger.warning(f"[DEBUG] No WebSocket data available for {symbol}")
+            return self._return_no_websocket_data(symbol, is_market_open)
+            
+        except Exception as e:
+            logger.error(f"Error in get_live_quote for {symbol}: {str(e)}")
+            return self._return_no_websocket_data(symbol, False)
+    
+    def _get_token_for_symbol(self, symbol: str) -> Optional[str]:
+        """Get token for symbol with various format attempts"""
+        if not hasattr(self, 'symbol_token_map') or not self.symbol_token_map:
+            return None
+            
+        # Try exact match first
+        token = self.symbol_token_map.get(symbol)
+        if token:
+            return token
+        
+        # Try variations
+        variations = [
+            symbol.replace('.NS', ''),
+            symbol.replace('.NS', '-EQ'),
+            symbol + '.NS' if '.NS' not in symbol else symbol,
+            symbol + '-EQ' if '-EQ' not in symbol else symbol
+        ]
+        
+        for variation in variations:
+            token = self.symbol_token_map.get(variation)
+            if token:
+                return token
+        
+        return None
+    
+    def _return_no_websocket_data(self, symbol: str, is_market_open: bool) -> Dict[str, Any]:
+        """Return a response indicating no WebSocket data is available"""
+        return {
+            'symbol': symbol,
+            'ltp': 0,
+            'change': 0,
+            'change_percent': 0,
+            'volume': 0,
+            'bid_price': 0,
+            'ask_price': 0,
+            'open': 0,
+            'high': 0,
+            'low': 0,
+            'close': 0,
+            'timestamp': datetime.now(),
+            'source': 'no_websocket_data',
+            'market_status': 'open' if is_market_open else 'closed',
+            'error': 'WebSocket data not available'
+        }
+
+    @with_rate_limit(max_retries=3, initial_delay=1.0)
+    def get_ltp(self, symbol: str) -> Optional[dict]:
+        """Get Last Traded Price for a symbol with enhanced error handling"""
+        try:
+            # 1. First try WebSocket data if available
+            if hasattr(self, 'websocket') and self.websocket and hasattr(self.websocket, 'live_feed'):
+                # Get token for symbol
+                token = self.symbol_token_map.get(symbol)
+                if token:
+                    # Check if we have live data
+                    if str(token) in self.websocket.live_feed:
+                        ws_data = self.websocket.live_feed[str(token)]
+                        return {
+                            'symbol': symbol,
+                            'ltp': ws_data['ltp'],
+                            'change': 0,  # Calculate if needed
+                            'change_percent': 0,  # Calculate if needed
+                            'volume': ws_data.get('volume', 0),
+                            'bid_price': ws_data.get('bid_price', 0),
+                            'ask_price': ws_data.get('ask_price', 0),
+                            'timestamp': ws_data.get('timestamp', datetime.now()),
+                            'source': 'websocket',
+                            'market_status': 'open' if self._is_market_open() else 'closed'
+                        }
+                    else:
+                        # Token exists but no live data - try to subscribe
+                        if self.websocket.is_connected and str(token) not in self.websocket.subscribed_tokens:
+                            logger.info(f"Subscribing to {symbol} (token: {token}) for live data")
+                            try:
+                                self.websocket.subscribe([str(token)], mode=self.websocket.MODE_QUOTE)
+                            except Exception as e:
+                                logger.warning(f"Failed to subscribe to {symbol}: {e}")
+                else:
+                    logger.debug(f"No token found for symbol {symbol} in symbol_token_map")
+
+            # 2. Fallback to API call for live data
+            if self.api_client:
+                try:
+                    token = self.symbol_token_map.get(symbol)
+                    if not token:
+                        logger.warning(f"No token found for symbol {symbol}")
+                        return self._get_fallback_quote(symbol)
+
+                    # Use Angel One getLTP API
+                    ltp_data = self.api_client.ltpData("NSE", symbol, token)
+                    if ltp_data and ltp_data.get('status') and ltp_data.get('data'):
+                        data = ltp_data['data']
+                        return {
+                            'symbol': symbol,
+                            'ltp': float(data.get('ltp', 0)),
+                            'change': float(data.get('change', 0)),
+                            'change_percent': float(data.get('change_percent', 0)),
+                            'volume': int(data.get('volume', 0)),
+                            'bid_price': 0,  # Not available in LTP API
+                            'ask_price': 0,  # Not available in LTP API
+                            'timestamp': datetime.now(),
+                            'source': 'api',
+                            'market_status': 'open' if self._is_market_open() else 'closed'
+                        }
+                except Exception as api_error:
+                    logger.warning(f"API call failed for {symbol}: {api_error}")
+
+            # 3. Fallback to cached data or CSV
+            return self._get_fallback_quote(symbol)
+
+        except Exception as e:
+            logger.error(f"Error getting live quote for {symbol}: {e}")
+            return self._get_fallback_quote(symbol)
+
+    def _get_fallback_quote(self, symbol):
+        """Get fallback quote data from cache or CSV"""
+        try:
+            # Try to get last known price from historical data
+            if hasattr(self, 'cache') and symbol in self.cache:
+                cached_data = self.cache[symbol]
+                if not cached_data.empty:
+                    last_row = cached_data.iloc[-1]
+                    return {
+                        'symbol': symbol,
+                        'ltp': float(last_row.get('close', 0)),
+                        'change': 0,
+                        'change_percent': 0,
+                        'volume': int(last_row.get('volume', 0)),
+                        'bid_price': 0,
+                        'ask_price': 0,
+                        'timestamp': datetime.now(),
+                        'source': 'cache',
+                        'market_status': 'closed'
+                    }
+
+            # Final fallback - try to load from CSV
+            csv_path = f"data/{symbol}_historical.csv"
+            if os.path.exists(csv_path):
+                df = pd.read_csv(csv_path)
+                if not df.empty:
+                    last_row = df.iloc[-1]
+                    return {
+                        'symbol': symbol,
+                        'ltp': float(last_row.get('close', 0)),
+                        'change': 0,
+                        'change_percent': 0,
+                        'volume': int(last_row.get('volume', 0)),
+                        'bid_price': 0,
+                        'ask_price': 0,
+                        'timestamp': datetime.now(),
+                        'source': 'csv',
+                        'market_status': 'closed'
+                    }
+
+            # Ultimate fallback
+            return {
+                'symbol': symbol,
+                'ltp': 0,
+                'change': 0,
+                'change_percent': 0,
+                'volume': 0,
+                'bid_price': 0,
+                'ask_price': 0,
+                'timestamp': datetime.now(),
+                'source': 'fallback',
+                'market_status': 'unknown'
+            }
+
+        except Exception as e:
+            logger.error(f"Error in fallback quote for {symbol}: {e}")
+            return {
+                'symbol': symbol,
+                'ltp': 0,
+                'change': 0,
+                'change_percent': 0,
+                'volume': 0,
+                'bid_price': 0,
+                'ask_price': 0,
+                'timestamp': datetime.now(),
+                'source': 'error',
+                'market_status': 'error',
+                'error': str(e)
+            }
+
+    def _is_market_open(self):
+        """Check if market is currently open"""
+        try:
+            now = datetime.now()
+            weekday = now.weekday()  # 0=Monday, 6=Sunday
+            
+            # Check if it's a weekend
+            if weekday >= 5:  # Saturday or Sunday
+                return False
+            
+            # Market hours: 9:15 AM to 3:30 PM
+            market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
+            market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+            
+            return market_open <= now <= market_close
+        except Exception:
+            return False
+
+    def cleanup(self):
+        """Clean up resources including WebSocket connections"""
+        try:
+            logger.info("Cleaning up DataCollector resources...")
+            
+            # Close WebSocket connection
+            if hasattr(self, 'websocket') and self.websocket:
+                try:
+                    self.websocket.close()
+                except Exception as e:
+                    logger.debug(f"Error closing websocket: {e}")
+            
+            # Close global WebSocket instance
+            close_global_websocket()
+            
+            # Close API client if needed
+            if hasattr(self, 'api_client') and self.api_client:
+                try:
+                    # Angel One API doesn't have explicit close method
+                    self.api_client = None
+                except Exception as e:
+                    logger.debug(f"Error closing API client: {e}")
+                    
+            logger.info("DataCollector cleanup completed")
+            
+        except Exception as e:
+            logger.error(f"Error during DataCollector cleanup: {e}")
+
+    def __del__(self):
+        """Destructor to ensure cleanup"""
+        try:
+            self.cleanup()
+        except:
+            pass

@@ -6,9 +6,62 @@ import warnings
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
     import pandas_ta as ta  # TODO: Migrate to pandas_ta v1.x or alternative in the future
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, LSTM, Dropout, BatchNormalization
-from tensorflow.keras.utils import to_categorical
+
+# Make TensorFlow imports optional to handle DLL issues
+try:
+    from tensorflow.keras.models import Sequential
+    from tensorflow.keras.layers import Dense, LSTM, Dropout, BatchNormalization
+    from tensorflow.keras.utils import to_categorical
+    import tensorflow as tf
+    TF_AVAILABLE = True
+    print("[INFO] TensorFlow loaded successfully")
+except ImportError as e:
+    print(f"[WARNING] TensorFlow not available: {e}")
+    print("[INFO] AI models will run in fallback mode without deep learning features")
+    TF_AVAILABLE = False
+    # Create dummy classes for compatibility
+    class Sequential:
+        def __init__(self, *args, **kwargs):
+            pass
+        def add(self, *args, **kwargs):
+            pass
+        def compile(self, *args, **kwargs):
+            pass
+        def fit(self, *args, **kwargs):
+            return None
+        def predict(self, *args, **kwargs):
+            return np.array([0.5, 0.5])
+
+    class Dense:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class LSTM:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class Dropout:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class BatchNormalization:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    def to_categorical(*args, **kwargs):
+        return np.array([[1, 0], [0, 1]])
+
+    # Define a dummy tf object with keras.callbacks.Callback for type hints
+    class DummyCallback:
+        pass
+    class DummyKerasCallbacks:
+        Callback = DummyCallback
+    class DummyKeras:
+        callbacks = DummyKerasCallbacks()
+    class DummyTF:
+        keras = DummyKeras()
+    tf = DummyTF()
+
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from typing import Optional, List, Dict, Any, Tuple, Union
 import os
@@ -17,12 +70,44 @@ import threading
 import time
 import talib
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
-import tensorflow as tf
-import gymnasium as gym
-from gymnasium import spaces
-from sklearn.utils import resample
 
 logger = logging.getLogger(__name__)
+
+# Make gymnasium optional as it can cause import issues
+try:
+    import gymnasium as gym
+    from gymnasium import spaces
+    GYMNASIUM_AVAILABLE = True
+    logger.info("Gymnasium (OpenAI Gym) imported successfully")
+except ImportError as e:
+    logger.warning(f"Gymnasium not available: {e}")
+    GYMNASIUM_AVAILABLE = False
+    # Create dummy classes for gymnasium
+    class DummyGym:
+        class Env:
+            def __init__(self, *args, **kwargs):
+                pass
+            def reset(self, *args, **kwargs):
+                return np.array([0.5]), {}
+            def step(self, *args, **kwargs):
+                return np.array([0.5]), 0.0, False, False, {}
+            def render(self, *args, **kwargs):
+                pass
+            def close(self, *args, **kwargs):
+                pass
+    
+    class DummySpaces:
+        class Box:
+            def __init__(self, *args, **kwargs):
+                pass
+        class Discrete:
+            def __init__(self, *args, **kwargs):
+                pass
+    
+    gym = DummyGym()
+    spaces = DummySpaces()
+
+from sklearn.utils import resample
 
 try:
     from sklearn.linear_model import LogisticRegression
@@ -55,18 +140,21 @@ class TechnicalAnalysisModel:
         logger.debug("TechnicalAnalysisModel initialized with config: %s", tech_params)
 
     def calculate_support_resistance(self, data: pd.DataFrame) -> Tuple[Dict[str, float], Dict[str, float]]:
-        """Calculate support and resistance levels using multiple methods"""
+        """Calculate support and resistance levels using multiple methods, with robust OHLCV validation"""
+        required_cols = ['open', 'high', 'low', 'close', 'volume']
+        missing_cols = [col for col in required_cols if col not in data.columns]
+        if missing_cols:
+            logger.error(f"[calculate_support_resistance] Missing required OHLCV columns: {missing_cols}. Skipping calculation.")
+            return {}, {}
         try:
             df = data.copy()
             supports = {}
             resistances = {}
-            
             # Method 1: Moving Average based SR levels
             for period in self.support_resistance_periods:
                 ma = talib.SMA(df['close'].values, timeperiod=period)
                 supports[f'ma_{period}'] = ma[-1] * 0.98  # 2% below MA
                 resistances[f'ma_{period}'] = ma[-1] * 1.02  # 2% above MA
-            
             # Method 2: Pivot Points
             high, low, close = df['high'].iloc[-1], df['low'].iloc[-1], df['close'].iloc[-1]
             pivot = (high + low + close) / 3
@@ -74,20 +162,15 @@ class TechnicalAnalysisModel:
             supports['pivot_s2'] = pivot - (high - low)
             resistances['pivot_r1'] = (2 * pivot) - low
             resistances['pivot_r2'] = pivot + (high - low)
-            
             # Method 3: Recent swing highs/lows
             window = 20
             df['swing_high'] = df['high'].rolling(window=window, center=True).max()
             df['swing_low'] = df['low'].rolling(window=window, center=True).min()
-            
             supports['swing'] = df['swing_low'].iloc[-1]
             resistances['swing'] = df['swing_high'].iloc[-1]
-            
             logger.debug("Calculated support levels: %s", supports)
             logger.debug("Calculated resistance levels: %s", resistances)
-            
             return supports, resistances
-            
         except Exception as e:
             logger.error("Error calculating support/resistance: %s", str(e))
             import traceback
@@ -95,21 +178,20 @@ class TechnicalAnalysisModel:
             return {}, {}
 
     def detect_trends(self, data: pd.DataFrame) -> Dict[str, str]:
-        """Detect market trends using multiple timeframes"""
+        """Detect market trends using multiple timeframes, with robust OHLCV validation"""
+        required_cols = ['close']
+        missing_cols = [col for col in required_cols if col not in data.columns]
+        if missing_cols:
+            logger.error(f"[detect_trends] Missing required columns: {missing_cols}. Skipping trend detection.")
+            return {}
         try:
             df = data.copy()
             trends = {}
-            
             for period in self.trend_detection_periods:
-                # Calculate EMAs for trend detection
                 ema = talib.EMA(df['close'].values, timeperiod=period)
                 current_ema = ema[-1]
                 prev_ema = ema[-2]
-                
-                # Calculate slope of EMA
                 slope = (current_ema - prev_ema) / prev_ema * 100
-                
-                # Determine trend strength and direction
                 if slope > 1.0:
                     trends[f'trend_{period}'] = 'strong_uptrend'
                 elif slope > 0.2:
@@ -120,10 +202,8 @@ class TechnicalAnalysisModel:
                     trends[f'trend_{period}'] = 'downtrend'
                 else:
                     trends[f'trend_{period}'] = 'sideways'
-            
             logger.debug("Detected trends: %s", trends)
             return trends
-            
         except Exception as e:
             logger.error("Error detecting trends: %s", str(e))
             import traceback
@@ -131,10 +211,14 @@ class TechnicalAnalysisModel:
             return {}
 
     def calculate_indicators(self, data: pd.DataFrame) -> pd.DataFrame:
-        """Calculate technical indicators with enhanced trend and SR detection"""
+        """Calculate technical indicators with enhanced trend and SR detection, with robust OHLCV validation"""
+        required_cols = ['open', 'high', 'low', 'close', 'volume']
+        missing_cols = [col for col in required_cols if col not in data.columns]
+        if missing_cols:
+            logger.error(f"[calculate_indicators] Missing required OHLCV columns: {missing_cols}. Skipping indicator calculation.")
+            return data
         try:
             df = data.copy()
-            
             # Basic indicators
             df['rsi'] = talib.RSI(df['close'].values, timeperiod=self.rsi_period)
             macd, signal, hist = talib.MACD(df['close'].values, 
@@ -144,7 +228,6 @@ class TechnicalAnalysisModel:
             df['macd'] = macd
             df['macd_signal'] = signal
             df['macd_hist'] = hist
-            
             # Bollinger Bands
             upper, middle, lower = talib.BBANDS(df['close'].values,
                                               timeperiod=self.bb_period,
@@ -153,21 +236,17 @@ class TechnicalAnalysisModel:
             df['bb_upper'] = upper
             df['bb_middle'] = middle
             df['bb_lower'] = lower
-            
             # Enhanced indicators
             df['atr'] = talib.ATR(df['high'], df['low'], df['close'], timeperiod=14)
             df['adx'] = talib.ADX(df['high'], df['low'], df['close'], timeperiod=14)
             df['obv'] = talib.OBV(df['close'], df['volume'])
-            
             # Trend indicators
             for period in self.trend_detection_periods:
                 df[f'sma_{period}'] = talib.SMA(df['close'], timeperiod=period)
                 df[f'ema_{period}'] = talib.EMA(df['close'], timeperiod=period)
-            
             # Calculate support/resistance and trends
             self.support_levels, self.resistance_levels = self.calculate_support_resistance(df)
             self.trends = self.detect_trends(df)
-            
             # Add SR and trend info to dataframe
             for level, value in self.support_levels.items():
                 df[f'support_{level}'] = value
@@ -175,13 +254,11 @@ class TechnicalAnalysisModel:
                 df[f'resistance_{level}'] = value
             for period, trend in self.trends.items():
                 df[f'trend_{period}'] = trend
-            
             logger.debug("Calculated indicators for data shape: %s", df.shape)
             # Log last row of indicators for transparency
             last_row = df.iloc[-1]
             logger.info(f"Technical indicators for last row: RSI={last_row.get('rsi')}, MACD={last_row.get('macd')}, BB_upper={last_row.get('bb_upper')}, ATR={last_row.get('atr')}, ADX={last_row.get('adx')}, OBV={last_row.get('obv')}")
             return df
-            
         except Exception as e:
             logger.error("Error calculating indicators: %s", str(e))
             import traceback
@@ -190,6 +267,10 @@ class TechnicalAnalysisModel:
 
     def build_model(self, input_shape, model_type='lstm'):
         """Build and compile the model with improved architecture"""
+        if not TENSORFLOW_AVAILABLE:
+            logger.warning("TensorFlow not available. Cannot build model.")
+            return DummyModel()
+            
         if isinstance(input_shape, tuple):
             timesteps, features = input_shape
             # Create a more sophisticated LSTM architecture
@@ -295,22 +376,50 @@ class TechnicalAnalysisModel:
             max_lookback = max(50, self.macd_slow, self.bb_period, 20)  # SMA_50, MACD slow, BB, ATR/ADX
             processed_data = processed_data.iloc[max_lookback:].copy()
             logger.info(f"[prepare_data] Dropped first {max_lookback} rows to ensure valid indicators for all features.")
-            processed_data = processed_data.fillna(method='ffill').fillna(method='bfill')
-            before_drop = len(processed_data)
-            processed_data = processed_data.dropna(subset=feature_cols + ['close']).copy()
-            after_drop = len(processed_data)
-            if after_drop < before_drop:
-                logger.warning(f"[prepare_data] Dropped {before_drop - after_drop} rows with NaN/Inf in features for symbol(s): {data.get('symbol', 'unknown')}")
-            # PATCH: If no samples left after dropping NaN/Inf, log and diagnose
-            if processed_data.empty:
-                logger.error(f"[prepare_data] No valid samples left after dropping NaN/Inf for features: {feature_cols}. Possible causes: API returned incomplete data, missing columns, or all data is invalid. Symbol(s): {data.get('symbol', 'unknown')}")
+            # Replace Inf with NaN for unified handling
+            processed_data[feature_cols] = processed_data[feature_cols].replace([np.inf, -np.inf], np.nan)
+            # Log missing data before any imputation
+            missing_by_col = processed_data[feature_cols].isnull().sum()
+            missing_cols = missing_by_col[missing_by_col > 0].index.tolist()
+            if missing_cols:
+                logger.warning(f"[prepare_data] Columns with missing values before imputation: {missing_cols}")
+                for col in missing_cols:
+                    missing_rows = processed_data.index[processed_data[col].isnull()].tolist()
+                    logger.warning(f"[prepare_data] {col} missing at rows: {missing_rows}")
+            # Impute: forward fill, then backward fill, then mean
+            processed_data[feature_cols] = processed_data[feature_cols].ffill().bfill()
+            for col in feature_cols:
+                if col in processed_data.columns:
+                    mean_val = processed_data[col].mean()
+                    processed_data[col] = processed_data[col].fillna(mean_val)
+            # Log remaining missing after imputation
+            still_missing_by_col = processed_data[feature_cols].isnull().sum()
+            still_missing_cols = still_missing_by_col[still_missing_by_col > 0].index.tolist()
+            if still_missing_cols:
+                logger.error(f"[prepare_data] Columns with missing values after imputation: {still_missing_cols}")
+                for col in still_missing_cols:
+                    missing_rows = processed_data.index[processed_data[col].isnull()].tolist()
+                    logger.error(f"[prepare_data] {col} still missing at rows: {missing_rows}")
+            # Drop all-NaN or all-Inf columns in features (last resort)
+            all_nan_cols = [col for col in feature_cols if col in processed_data.columns and processed_data[col].isna().all()]
+            all_inf_cols = [col for col in feature_cols if col in processed_data.columns and (processed_data[col] == np.inf).all()]
+            if all_nan_cols or all_inf_cols:
+                logger.warning(f"[prepare_data] Dropping columns with all-NaN: {all_nan_cols}, all-Inf: {all_inf_cols}")
+                processed_data = processed_data.drop(columns=all_nan_cols + all_inf_cols)
+                feature_cols = [col for col in feature_cols if col not in all_nan_cols + all_inf_cols]
+            # Drop rows with any remaining NaN/Inf (last resort)
+            rows_before = processed_data.shape[0]
+            processed_data = processed_data.dropna(subset=feature_cols)
+            rows_after = processed_data.shape[0]
+            if rows_after < rows_before:
+                logger.warning(f"[prepare_data] Dropped {rows_before - rows_after} rows with remaining NaN/Inf after all imputations. Row indices dropped: {set(range(rows_before)) - set(processed_data.index)}")
+            # If too few valid rows, skip model training
+            if processed_data.empty or processed_data[feature_cols].shape[0] < 10:
+                logger.error(f"[prepare_data] No valid samples left after feature engineering for features: {feature_cols}. Possible causes: API returned incomplete data, missing columns, or all data is invalid. Symbol(s): {data.get('symbol', 'unknown')}")
                 logger.error(f"[prepare_data] Original input shape: {data.shape}, columns: {list(data.columns)}")
-                logger.error(f"[prepare_data] Data head before drop:\n{data.head()}\nData tail:\n{data.tail()}")
-                # Distinguish between real data error and pipeline issue
-                if data.empty:
-                    logger.error("[prepare_data] Input data is empty. This is a real data error (API or source returned no data). Failing function.")
-                else:
-                    logger.error("[prepare_data] Input data was present but all rows dropped. This may be a pipeline/feature engineering issue. Failing function.")
+                logger.error(f"[prepare_data] Data head before fill:\n{data.head()}\nData tail:\n{data.tail()}")
+                logger.error(f"[prepare_data] Data after all imputations and drops:\n{processed_data.head()}\n...\n{processed_data.tail()}")
+                logger.error(f"[prepare_data] Skipping model training for this symbol due to insufficient valid data (rows after drop: {processed_data[feature_cols].shape[0]}).")
                 return None, None
             
             # Now create features and labels
