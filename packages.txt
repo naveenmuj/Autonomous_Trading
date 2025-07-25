@@ -1,1 +1,2 @@
 libta-dev
+build-essential
