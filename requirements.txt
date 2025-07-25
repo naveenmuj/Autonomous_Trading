@@ -138,7 +138,8 @@ sympy==1.14.0
 ta==0.11.0
 # TA-Lib @ /libs/TA_Lib-0.4.24-cp39-cp39-win_amd64.whl#sha256=d4205d243686ef91fb8167c82c56b6c2ed088b052fb76adf5734f38dccefc22a  
 # TA-Lib==0.4.24
-talib-binary
+# talib-binary
+ta-lib-everywhere
 tenacity==8.5.0
 tensorboard==2.9.0
 tensorboard-data-server==0.6.1
