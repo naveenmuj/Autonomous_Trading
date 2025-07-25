@@ -115,6 +115,711 @@ class DashboardUI:
         return trading_config.get('symbols', ['RELIANCE.NS', 'TCS.NS', 'HDFCBANK.NS', 'INFY.NS', 'ICICIBANK.NS'])
 
     def _fetch_and_display_live_prices(self, symbols: List[str] = None):
+        """Display live prices with WebSocket data streaming - continuous updates without page refresh"""
+        try:
+            # Early return if not properly initialized
+            if symbols is None or len(symbols) == 0:
+                st.info("No symbols selected for monitoring")
+                return
+                
+            if not self.data_collector:
+                st.error("Data collector not available!")
+                return
+
+            # Check market status 
+            current_time = datetime.now()
+            market_open_time = current_time.replace(hour=9, minute=15, second=0, microsecond=0)
+            market_close_time = current_time.replace(hour=15, minute=30, second=0, microsecond=0)
+            is_market_open = market_open_time <= current_time <= market_close_time
+            
+            # Try to get WebSocket instance
+            websocket_instance = None
+            try:
+                if hasattr(self.data_collector, 'websocket') and self.data_collector.websocket:
+                    websocket_instance = self.data_collector.websocket
+                else:
+                    from data.websocket import get_websocket_instance
+                    websocket_instance = get_websocket_instance()
+            except Exception as e:
+                logger.debug(f"[WEBSOCKET] Could not access websocket: {e}")
+            
+            # Create the streaming interface
+            if websocket_instance:
+                st.markdown("### 🔴 Live WebSocket Stream")
+                st.caption("Continuous price updates from WebSocket feed")
+                self._create_live_streaming_interface(symbols, websocket_instance, is_market_open)
+            else:
+                st.markdown("### 📊 Market Data (API)")
+                st.warning("WebSocket not available - Using API fallback")
+                self._display_api_fallback(symbols, is_market_open)
+                        
+        except Exception as e:
+            logger.error(f"Error in live streaming setup: {str(e)}", exc_info=True)
+            st.error("Live streaming setup failed")
+
+    def _create_live_streaming_interface(self, symbols: List[str], websocket_instance, is_market_open: bool):
+        """Create a live streaming interface that continuously updates from WebSocket data"""
+        try:
+            # Display status
+            status_cols = st.columns([2, 2, 1])
+            with status_cols[0]:
+                if is_market_open:
+                    st.success("🟢 Market OPEN")
+                else:
+                    st.info("🔴 Market CLOSED")
+            
+            with status_cols[1]:
+                connection_status = getattr(websocket_instance, 'connection_state', 'unknown')
+                if connection_status == 'connected':
+                    st.success("🔴 LIVE STREAM")
+                else:
+                    st.warning(f"🔶 {connection_status.upper()}")
+            
+            with status_cols[2]:
+                # This will be updated by the streaming loop
+                time_placeholder = st.empty()
+            
+            # Create streaming containers for each symbol
+            cols = st.columns(len(symbols))
+            placeholders = {}
+            
+            for i, symbol in enumerate(symbols):
+                with cols[i]:
+                    symbol_name = symbol.replace('.NS', '')
+                    
+                    # Create containers that will be updated continuously
+                    header_container = st.container()
+                    price_container = st.container()
+                    status_container = st.container()
+                    time_container = st.container()
+                    
+                    # Initialize display
+                    with header_container:
+                        st.subheader(f"🔴 {symbol_name}")
+                    
+                    # Create empty placeholders for live updates
+                    price_placeholder = price_container.empty()
+                    status_placeholder = status_container.empty()
+                    timestamp_placeholder = time_container.empty()
+                    
+                    # Store placeholders for updates
+                    placeholders[symbol] = {
+                        'price': price_placeholder,
+                        'status': status_placeholder,
+                        'timestamp': timestamp_placeholder
+                    }
+                    
+                    # Initialize with placeholder data
+                    price_placeholder.metric("Price", "₹ --")
+                    status_placeholder.caption("🔴 Connecting...")
+                    timestamp_placeholder.caption("⏰ --:--:--")
+            
+            # Streaming loop - this will continuously update the placeholders
+            st.markdown("---")
+            stream_status = st.empty()
+            update_counter = st.empty()
+            
+            # Initialize streaming state
+            if 'streaming_active' not in st.session_state:
+                st.session_state.streaming_active = True
+                st.session_state.update_count = 0
+                st.session_state.last_update = time.time()
+            
+            # Button to control streaming
+            col1, col2 = st.columns([1, 4])
+            with col1:
+                if st.button("⏹️ Stop Stream" if st.session_state.streaming_active else "▶️ Start Stream"):
+                    st.session_state.streaming_active = not st.session_state.streaming_active
+                    st.rerun()
+            
+            with col2:
+                st.caption("Stream will update continuously while active")
+            
+            # Main streaming loop
+            if st.session_state.streaming_active:
+                self._run_streaming_loop(
+                    symbols, 
+                    websocket_instance, 
+                    placeholders, 
+                    time_placeholder,
+                    stream_status,
+                    update_counter
+                )
+            else:
+                stream_status.info("🔴 Streaming paused")
+                
+        except Exception as e:
+            logger.error(f"Error creating live streaming interface: {e}")
+            st.error("Failed to create streaming interface")
+
+    def _run_streaming_loop(self, symbols, websocket_instance, placeholders, time_placeholder, stream_status, update_counter):
+        """Run the continuous streaming loop that updates UI"""
+        try:
+            # Check if we have WebSocket data
+            if not hasattr(websocket_instance, 'live_feed') or not websocket_instance.live_feed:
+                stream_status.warning("🔶 WebSocket connected but no data received yet")
+                return
+            
+            current_time = datetime.now()
+            time_placeholder.caption(f"⏰ {current_time.strftime('%H:%M:%S')}")
+            
+            # Update each symbol
+            symbols_updated = 0
+            for symbol in symbols:
+                try:
+                    if symbol not in placeholders:
+                        continue
+                    
+                    # Try to find data for this symbol in WebSocket feed
+                    live_data = None
+                    symbol_variants = [
+                        symbol, 
+                        symbol.replace('.NS', ''), 
+                        symbol.upper(), 
+                        symbol.lower()
+                    ]
+                    
+                    for variant in symbol_variants:
+                        if variant in websocket_instance.live_feed:
+                            live_data = websocket_instance.live_feed[variant]
+                            break
+                    
+                    if live_data and isinstance(live_data, dict):
+                        # Extract price information
+                        price = float(live_data.get('ltp', live_data.get('last_price', 0)))
+                        
+                        if price > 0:
+                            # Calculate change from previous price
+                            prev_price_key = f"prev_price_{symbol}"
+                            change = 0
+                            change_pct = 0
+                            
+                            if prev_price_key in st.session_state:
+                                prev_price = st.session_state[prev_price_key]
+                                if prev_price > 0:
+                                    change = price - prev_price
+                                    change_pct = (change / prev_price) * 100
+                            
+                            # Store current price for next comparison
+                            st.session_state[prev_price_key] = price
+                            
+                            # Format change display
+                            delta_color = "normal" if change > 0 else "inverse" if change < 0 else "off"
+                            change_text = f"{change:+.2f} ({change_pct:+.2f}%)" if change != 0 else None
+                            
+                            # Update the price display
+                            placeholders[symbol]['price'].metric(
+                                "Price",
+                                f"₹{price:,.2f}",
+                                delta=change_text,
+                                delta_color=delta_color
+                            )
+                            
+                            # Update status
+                            placeholders[symbol]['status'].caption("🔴 LIVE WebSocket")
+                            
+                            # Update timestamp
+                            timestamp = live_data.get('timestamp')
+                            if timestamp and hasattr(timestamp, 'strftime'):
+                                time_str = timestamp.strftime('%H:%M:%S')
+                            else:
+                                time_str = current_time.strftime('%H:%M:%S')
+                            
+                            placeholders[symbol]['timestamp'].caption(f"⏰ {time_str}")
+                            
+                            symbols_updated += 1
+                            logger.debug(f"[STREAM] Updated {symbol}: ₹{price:.2f}")
+                        else:
+                            # Price is 0 or invalid
+                            placeholders[symbol]['price'].metric("Price", "₹ --")
+                            placeholders[symbol]['status'].caption("🔴 LIVE (No Price)")
+                    else:
+                        # No data for this symbol
+                        placeholders[symbol]['status'].caption("🔴 LIVE (Waiting...)")
+                        
+                except Exception as e:
+                    logger.error(f"Error updating {symbol}: {e}")
+                    placeholders[symbol]['status'].caption("❌ Update Error")
+            
+            # Update streaming status
+            st.session_state.update_count += 1
+            st.session_state.last_update = time.time()
+            
+            stream_status.success(f"🔴 STREAMING ACTIVE - {symbols_updated}/{len(symbols)} symbols updated")
+            update_counter.caption(f"Updates: {st.session_state.update_count} | Last: {current_time.strftime('%H:%M:%S')}")
+            
+            # Show WebSocket feed debug info
+            with st.expander("🔧 WebSocket Feed Debug", expanded=False):
+                st.write(f"**Total symbols in feed:** {len(websocket_instance.live_feed)}")
+                st.write(f"**Available symbols:** {list(websocket_instance.live_feed.keys())}")
+                st.write(f"**Connection state:** {getattr(websocket_instance, 'connection_state', 'unknown')}")
+                
+                if websocket_instance.live_feed:
+                    st.write("**Sample data:**")
+                    # Show sample data from first available symbol
+                    first_key = list(websocket_instance.live_feed.keys())[0]
+                    sample_data = websocket_instance.live_feed[first_key]
+                    if isinstance(sample_data, dict):
+                        st.json({k: v for k, v in sample_data.items() if k in ['token', 'ltp', 'timestamp', 'volume']})
+            
+            # Auto-refresh for continuous streaming
+            time.sleep(1)  # 1 second interval
+            st.rerun()
+            
+        except Exception as e:
+            logger.error(f"Error in streaming loop: {e}")
+            stream_status.error(f"❌ Streaming error: {str(e)}")
+            st.session_state.streaming_active = False
+
+    def _display_api_fallback(self, symbols: List[str], is_market_open: bool):
+        """Display market data using API calls when WebSocket is not available"""
+        try:
+            # Display status bar
+            current_time = datetime.now()
+            status_cols = st.columns([2, 2, 1])
+            with status_cols[0]:
+                if is_market_open:
+                    st.success("� Market OPEN")
+                else:
+                    st.info("🔴 Market CLOSED")
+            
+            with status_cols[1]:
+                st.warning("📡 API Mode")
+            
+            with status_cols[2]:
+                st.caption(f"⏰ {current_time.strftime('%H:%M:%S')}")
+            
+            # Create price display columns
+            cols = st.columns(len(symbols))
+            
+            for i, symbol in enumerate(symbols):
+                with cols[i]:
+                    try:
+                        if hasattr(self.data_collector, 'get_live_quote'):
+                            price_data = self.data_collector.get_live_quote(symbol)
+                            st.subheader(symbol.replace('.NS', ''))
+                            
+                            if price_data and isinstance(price_data, dict) and 'ltp' in price_data and price_data['ltp'] > 0:
+                                price = float(price_data['ltp'])
+                                change = float(price_data.get('change', 0))
+                                change_pct = float(price_data.get('change_percent', 0))
+                                
+                                delta_color = "normal" if change > 0 else "inverse" if change < 0 else "off"
+                                change_text = f"{change:+.2f} ({change_pct:+.2f}%)" if change != 0 else None
+                                
+                                st.metric(
+                                    "Price",
+                                    f"₹{price:,.2f}",
+                                    delta=change_text,
+                                    delta_color=delta_color
+                                )
+                                
+                                st.caption("📊 API Data")
+                            else:
+                                st.metric("Price", "₹ --")
+                                st.caption("⚠️ No data")
+                        else:
+                            st.subheader(symbol.replace('.NS', ''))
+                            st.metric("Price", "₹ --")
+                            st.caption("⚠️ No API")
+                    except Exception as e:
+                        st.subheader(symbol.replace('.NS', ''))
+                        st.metric("Price", "₹ --")
+                        st.caption("❌ API Error")
+        except Exception as e:
+            logger.error(f"Error in API fallback display: {e}")
+            st.error("Error displaying market data")
+
+    def _setup_live_streaming_for_symbol(self, symbol, containers, websocket_instance):
+        """Setup live streaming for a specific symbol"""
+        try:
+            # Get initial data if available
+            live_data = None
+            if hasattr(websocket_instance, 'live_feed') and websocket_instance.live_feed:
+                symbol_variants = [symbol, symbol.replace('.NS', ''), symbol.upper(), symbol.lower()]
+                for variant in symbol_variants:
+                    if variant in websocket_instance.live_feed:
+                        live_data = websocket_instance.live_feed[variant]
+                        break
+            
+            if live_data and isinstance(live_data, dict):
+                # Display live WebSocket data
+                containers['header'].subheader(f"🔴 {symbol.replace('.NS', '')} LIVE")
+                
+                price = float(live_data.get('ltp', live_data.get('last_price', 0)))
+                change = float(live_data.get('change', live_data.get('chg', 0)))
+                change_pct = float(live_data.get('change_percent', live_data.get('chg_per', 0)))
+                
+                if price > 0:
+                    # Color logic
+                    delta_color = "normal" if change > 0 else "inverse" if change < 0 else "off"
+                    change_text = f"{change:+.2f} ({change_pct:+.2f}%)" if change != 0 else None
+                    
+                    with containers['price']:
+                        st.metric(
+                            "Price",
+                            f"₹{price:,.2f}",
+                            delta=change_text,
+                            delta_color=delta_color
+                        )
+                    
+                    containers['status'].caption("🔴 LIVE WebSocket Stream")
+                    
+                    # Timestamp
+                    timestamp = live_data.get('timestamp', live_data.get('exchange_timestamp'))
+                    if timestamp and isinstance(timestamp, (int, float)):
+                        dt = datetime.fromtimestamp(timestamp)
+                        containers['timestamp'].caption(f"⏰ {dt.strftime('%H:%M:%S')}")
+                else:
+                    containers['price'].metric("Price", "₹ --")
+                    containers['status'].caption("🔴 LIVE Stream (No Price)")
+            else:
+                # No live data yet, show placeholder
+                containers['header'].subheader(f"🔴 {symbol.replace('.NS', '')} LIVE")
+                containers['price'].metric("Price", "₹ --")
+                containers['status'].caption("🔴 Connecting to stream...")
+                
+        except Exception as e:
+            logger.error(f"Error setting up streaming for {symbol}: {e}")
+            containers['header'].subheader(symbol.replace('.NS', ''))
+            containers['price'].metric("Price", "₹ --")
+            containers['status'].caption("❌ Stream Error")
+
+    def _display_static_price(self, symbol, containers):
+        """Display static price data as fallback"""
+        try:
+            if hasattr(self.data_collector, 'get_live_quote'):
+                price_data = self.data_collector.get_live_quote(symbol)
+                containers['header'].subheader(symbol.replace('.NS', ''))
+                
+                if price_data and isinstance(price_data, dict) and 'ltp' in price_data and price_data['ltp'] > 0:
+                    price = float(price_data['ltp'])
+                    change = float(price_data.get('change', 0))
+                    change_pct = float(price_data.get('change_percent', 0))
+                    
+                    delta_color = "normal" if change > 0 else "inverse" if change < 0 else "off"
+                    change_text = f"{change:+.2f} ({change_pct:+.2f}%)" if change != 0 else None
+                    
+                    with containers['price']:
+                        st.metric(
+                            "Price",
+                            f"₹{price:,.2f}",
+                            delta=change_text,
+                            delta_color=delta_color
+                        )
+                    
+                    containers['status'].caption("📊 API Data")
+                else:
+                    containers['price'].metric("Price", "₹ --")
+                    containers['status'].caption("⚠️ No data")
+            else:
+                containers['header'].subheader(symbol.replace('.NS', ''))
+                containers['price'].metric("Price", "₹ --")
+                containers['status'].caption("⚠️ No API")
+        except Exception as e:
+            containers['header'].subheader(symbol.replace('.NS', ''))
+            containers['price'].metric("Price", "₹ --")
+            containers['status'].caption("❌ API Error")
+
+    def _websocket_live_update_callback(self, message):
+        """Callback function that updates UI in real-time when WebSocket receives data"""
+        try:
+            # This function will be called every time WebSocket receives data
+            # Parse the message and update the appropriate containers
+            if isinstance(message, dict) and 'symbol' in message:
+                symbol = message['symbol']
+                
+                # Check if we have a container for this symbol
+                if ('live_price_containers' in st.session_state and 
+                    symbol in st.session_state.live_price_containers):
+                    
+                    containers = st.session_state.live_price_containers[symbol]
+                    
+                    # Update price in real-time
+                    price = float(message.get('ltp', message.get('last_price', 0)))
+                    change = float(message.get('change', message.get('chg', 0)))
+                    change_pct = float(message.get('change_percent', message.get('chg_per', 0)))
+                    
+                    if price > 0:
+                        delta_color = "normal" if change > 0 else "inverse" if change < 0 else "off"
+                        change_text = f"{change:+.2f} ({change_pct:+.2f}%)" if change != 0 else None
+                        
+                        # Update the price container in real-time
+                        with containers['price']:
+                            st.metric(
+                                "Price",
+                                f"₹{price:,.2f}",
+                                delta=change_text,
+                                delta_color=delta_color
+                            )
+                        
+                        # Update timestamp
+                        current_time = datetime.now()
+                        containers['timestamp'].caption(f"⏰ {current_time.strftime('%H:%M:%S')}")
+                        
+                        logger.info(f"[LIVE_STREAM] Updated {symbol}: ₹{price:,.2f}")
+                        
+        except Exception as e:
+            logger.error(f"Error in live update callback: {e}")
+
+    def _create_websocket_streaming_ui(self, symbols: List[str]):
+        """Create a true WebSocket streaming UI using continuous data polling"""
+        try:
+            # Check if WebSocket is available
+            websocket_instance = None
+            try:
+                if hasattr(self.data_collector, 'websocket') and self.data_collector.websocket:
+                    websocket_instance = self.data_collector.websocket
+                else:
+                    from data.websocket import get_websocket_instance
+                    websocket_instance = get_websocket_instance()
+            except Exception as e:
+                logger.debug(f"[WEBSOCKET] Could not access websocket: {e}")
+                st.error("WebSocket connection not available for live streaming")
+                return
+            
+            if not websocket_instance:
+                st.error("No WebSocket instance available")
+                return
+            
+            # Status indicator
+            status_container = st.container()
+            with status_container:
+                cols = st.columns([1, 1, 2])
+                with cols[0]:
+                    if hasattr(websocket_instance, 'is_connected') and websocket_instance.is_connected:
+                        st.success("🔴 LIVE STREAMING")
+                    else:
+                        st.warning("🔶 CONNECTING...")
+                with cols[1]:
+                    current_time = datetime.now()
+                    st.caption(f"⏰ {current_time.strftime('%H:%M:%S')}")
+                with cols[2]:
+                    st.caption("WebSocket live data feed - Updates as data arrives")
+            
+            # Create price display area with empty placeholders
+            price_container = st.container()
+            
+            with price_container:
+                cols = st.columns(len(symbols))
+                
+                # Create placeholders for each symbol
+                placeholders = {}
+                for i, symbol in enumerate(symbols):
+                    with cols[i]:
+                        symbol_key = symbol.replace('.NS', '')
+                        
+                        # Create placeholders that we'll update
+                        header_ph = st.empty()
+                        price_ph = st.empty()
+                        status_ph = st.empty()
+                        time_ph = st.empty()
+                        
+                        placeholders[symbol] = {
+                            'header': header_ph,
+                            'price': price_ph,
+                            'status': status_ph,
+                            'timestamp': time_ph
+                        }
+                        
+                        # Initialize display
+                        header_ph.subheader(f"🔴 {symbol_key} LIVE")
+                        price_ph.metric("Price", "₹ --")
+                        status_ph.caption("🔴 Connecting to stream...")
+                        time_ph.caption("⏰ --:--:--")
+            
+            # Continuous streaming loop using WebSocket data
+            streaming_container = st.empty()
+            
+            def start_streaming():
+                """Start the continuous streaming process"""
+                try:
+                    update_count = 0
+                    last_update_time = time.time()
+                    
+                    while True:
+                        current_time = time.time()
+                        
+                        # Update every 0.5 seconds for near real-time feel
+                        if current_time - last_update_time >= 0.5:
+                            
+                            # Check if we still have WebSocket data
+                            if not hasattr(websocket_instance, 'live_feed') or not websocket_instance.live_feed:
+                                # No data yet, keep trying
+                                for symbol in symbols:
+                                    if symbol in placeholders:
+                                        placeholders[symbol]['status'].caption("🔴 Waiting for data...")
+                                time.sleep(0.5)
+                                continue
+                            
+                            # Update each symbol with latest WebSocket data
+                            for symbol in symbols:
+                                try:
+                                    if symbol not in placeholders:
+                                        continue
+                                    
+                                    # Try to find data for this symbol
+                                    live_data = None
+                                    symbol_variants = [
+                                        symbol, 
+                                        symbol.replace('.NS', ''), 
+                                        symbol.upper(), 
+                                        symbol.lower()
+                                    ]
+                                    
+                                    for variant in symbol_variants:
+                                        if variant in websocket_instance.live_feed:
+                                            live_data = websocket_instance.live_feed[variant]
+                                            break
+                                    
+                                    if live_data and isinstance(live_data, dict):
+                                        # Extract price data
+                                        price = float(live_data.get('ltp', live_data.get('last_price', 0)))
+                                        
+                                        if price > 0:
+                                            # Calculate change if we have previous price
+                                            change = 0
+                                            change_pct = 0
+                                            prev_key = f"prev_price_{symbol}"
+                                            
+                                            if prev_key in st.session_state:
+                                                prev_price = st.session_state[prev_key]
+                                                change = price - prev_price
+                                                change_pct = (change / prev_price) * 100 if prev_price > 0 else 0
+                                            
+                                            # Store current price for next comparison
+                                            st.session_state[prev_key] = price
+                                            
+                                            # Update UI elements
+                                            delta_color = "normal" if change > 0 else "inverse" if change < 0 else "off"
+                                            change_text = f"{change:+.2f} ({change_pct:+.2f}%)" if change != 0 else None
+                                            
+                                            # Update price display
+                                            placeholders[symbol]['price'].metric(
+                                                "Price",
+                                                f"₹{price:,.2f}",
+                                                delta=change_text,
+                                                delta_color=delta_color
+                                            )
+                                            
+                                            # Update status and timestamp
+                                            placeholders[symbol]['status'].caption("🔴 LIVE WebSocket")
+                                            
+                                            # Use WebSocket timestamp if available
+                                            timestamp = live_data.get('timestamp')
+                                            if timestamp and hasattr(timestamp, 'strftime'):
+                                                time_str = timestamp.strftime('%H:%M:%S')
+                                            else:
+                                                time_str = datetime.now().strftime('%H:%M:%S')
+                                            
+                                            placeholders[symbol]['timestamp'].caption(f"⏰ {time_str}")
+                                            
+                                            update_count += 1
+                                            logger.debug(f"[STREAM] Updated {symbol}: ₹{price:.2f}")
+                                        else:
+                                            # No valid price
+                                            placeholders[symbol]['price'].metric("Price", "₹ --")
+                                            placeholders[symbol]['status'].caption("🔴 LIVE (No Price)")
+                                    else:
+                                        # No data for this symbol
+                                        placeholders[symbol]['status'].caption("🔴 LIVE (Waiting...)")
+                                        
+                                except Exception as e:
+                                    logger.error(f"Error updating {symbol}: {e}")
+                                    placeholders[symbol]['status'].caption("❌ Update Error")
+                            
+                            last_update_time = current_time
+                            
+                        # Small sleep to prevent CPU overload
+                        time.sleep(0.1)
+                        
+                        # Break after some updates for demo (remove in production)
+                        if update_count > 100:  # Limit for demo purposes
+                            break
+                            
+                except Exception as e:
+                    logger.error(f"Error in streaming loop: {e}")
+                    st.error("Streaming loop error")
+            
+            # Show streaming status
+            connection_status = getattr(websocket_instance, 'connection_state', 'unknown')
+            if connection_status == 'connected':
+                st.success("🔗 WebSocket Connected - Starting live stream...")
+                
+                # Start streaming in background (note: this won't work in Streamlit's normal mode)
+                # Instead, we'll use a different approach with session state
+                st.info("💡 **Note:** This demonstrates the streaming concept. In practice, you would need to use Streamlit's `st.fragment(run_every)` or external streaming service.")
+                
+                # Show current data as a snapshot
+                self._show_current_websocket_data(symbols, websocket_instance)
+                
+            else:
+                st.warning(f"🔗 WebSocket Status: {connection_status}")
+                st.error("Cannot start streaming - WebSocket not connected")
+                
+        except Exception as e:
+            logger.error(f"Error setting up WebSocket streaming UI: {e}")
+            st.error("Failed to set up live streaming interface")
+
+    def _show_current_websocket_data(self, symbols: List[str], websocket_instance):
+        """Show current WebSocket data as a snapshot"""
+        try:
+            st.markdown("#### Current WebSocket Data")
+            
+            if not hasattr(websocket_instance, 'live_feed') or not websocket_instance.live_feed:
+                st.info("No live data available yet from WebSocket")
+                return
+                
+            cols = st.columns(len(symbols))
+            
+            for i, symbol in enumerate(symbols):
+                with cols[i]:
+                    symbol_key = symbol.replace('.NS', '')
+                    
+                    # Try to find data for this symbol
+                    live_data = None
+                    symbol_variants = [symbol, symbol.replace('.NS', ''), symbol.upper(), symbol.lower()]
+                    
+                    for variant in symbol_variants:
+                        if variant in websocket_instance.live_feed:
+                            live_data = websocket_instance.live_feed[variant]
+                            break
+                    
+                    if live_data and isinstance(live_data, dict):
+                        price = float(live_data.get('ltp', live_data.get('last_price', 0)))
+                        
+                        if price > 0:
+                            st.metric(f"{symbol_key}", f"₹{price:.2f}")
+                            st.caption("🔴 Live from WebSocket")
+                            
+                            # Show timestamp if available
+                            timestamp = live_data.get('timestamp')
+                            if timestamp and hasattr(timestamp, 'strftime'):
+                                st.caption(f"⏰ {timestamp.strftime('%H:%M:%S')}")
+                        else:
+                            st.metric(f"{symbol_key}", "₹ --")
+                            st.caption("🔴 Connected (No Price)")
+                    else:
+                        st.metric(f"{symbol_key}", "₹ --") 
+                        st.caption("⚠️ No data for symbol")
+            
+            # Show raw WebSocket feed info
+            with st.expander("🔧 WebSocket Feed Debug"):
+                st.write(f"**Total symbols in feed:** {len(websocket_instance.live_feed)}")
+                st.write(f"**Available symbols:** {list(websocket_instance.live_feed.keys())}")
+                
+                if websocket_instance.live_feed:
+                    # Show sample data from first symbol
+                    first_symbol = list(websocket_instance.live_feed.keys())[0]
+                    sample_data = websocket_instance.live_feed[first_symbol]
+                    st.json(sample_data)
+                    
+        except Exception as e:
+            logger.error(f"Error showing current WebSocket data: {e}")
+            st.error("Error displaying WebSocket data")        except Exception as e:
+            logger.error(f"Error in fragment: {str(e)}", exc_info=True)
+            # Show minimal error in UI to avoid session issues
+            st.error("Live data temporarily unavailable")
         """Display live prices with WebSocket streaming - NO UI REFRESH"""
         try:
             if not self.data_collector:
@@ -324,55 +1029,26 @@ class DashboardUI:
             st.error(f"Error updating prices: {str(e)}")
 
     def render_trading_tab(self):
-        import streamlit as st
-        st.info("[DEBUG] render_trading_tab() called")
+        """Render the trading tab with live price streaming"""
         try:
             st.header("Trading Dashboard")
+            
+            # Get symbols
             all_symbols = self._get_symbols()
-            st.info(f"[DEBUG] all_symbols: {all_symbols}")
             
-            # TEMP: Direct test of get_live_quote method
-            if self.data_collector and hasattr(self.data_collector, 'get_live_quote'):
-                st.info("[DEBUG] Testing get_live_quote method directly...")
-                test_symbol = 'RELIANCE.NS'
-                try:
-                    test_result = self.data_collector.get_live_quote(test_symbol)
-                    st.info(f"[DEBUG] get_live_quote('{test_symbol}') returned: {test_result}")
-                    st.info(f"[DEBUG] Result type: {type(test_result)}")
-                    if test_result:
-                        st.info(f"[DEBUG] Result keys: {list(test_result.keys()) if isinstance(test_result, dict) else 'Not a dict'}")
-                except Exception as e:
-                    st.error(f"[DEBUG] get_live_quote failed with error: {e}")
-                    import traceback
-                    st.text(traceback.format_exc())
-            
-            # DEBUG: Show recent logs
-            with st.expander("Debug Logs", expanded=False):
-                try:
-                    import logging
-                    # Check if we have the StreamlitLogHandler
-                    streamlit_handlers = [h for h in logging.getLogger().handlers if hasattr(h, 'log_messages')]
-                    if streamlit_handlers:
-                        recent_logs = streamlit_handlers[0].log_messages[-20:]  # Show last 20 messages
-                        for log_msg in recent_logs:
-                            st.text(log_msg)
-                    else:
-                        st.text("No debug handler found")
-                except Exception as e:
-                    st.text(f"Error showing logs: {e}")
-            
-            # --- Searchable multi-select for all stocks ---
+            # Searchable multi-select for all stocks
             monitored_symbols = st.multiselect(
-                "Select stocks to monitor (star to add/remove)",
+                "Select stocks to monitor (search and select)",
                 options=all_symbols,
-                default=all_symbols[:5],
+                default=all_symbols[:4],  # Default to first 4 symbols
                 help="Search and select stocks to monitor live. All stocks are available for training."
             )
-            st.info(f"[DEBUG] monitored_symbols: {monitored_symbols}")
+            
             if not monitored_symbols:
                 st.info("No stocks selected for monitoring. Use the search box above to add.")
             else:
-                st.info(f"[DEBUG] About to call _fetch_and_display_live_prices with {monitored_symbols}")
+                # Call the fragment for live price streaming
+                # This will auto-update every 2 seconds
                 self._fetch_and_display_live_prices(monitored_symbols)
 
             # Trading mode: always live
