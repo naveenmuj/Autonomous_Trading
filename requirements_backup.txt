@@ -1,0 +1,86 @@
+# Core ML/Data Libraries
+numpy==1.21.0  # Fixed version for TensorFlow compatibility
+pandas==1.4.4  # Compatible with both TensorFlow and Streamlit
+scikit-learn==1.0.2  # Stable version for Python 3.9
+tensorflow-cpu==2.9.0  # Last version with good Python 3.9 support
+protobuf==3.20.3  # Required for TensorFlow compatibility
+
+# Technical Analysis
+pandas-ta>=0.3.14b0
+# TA-Lib installed from wheel file in libs/
+# ta-lib==0.4.24
+
+# Trading/Financial Libraries
+yfinance>=0.2.18
+smartapi-python>=1.3.5
+websocket-client>=1.6.1
+
+# Web/API Libraries
+requests>=2.31.0
+urllib3<2.0.0
+certifi>=2023.5.7
+charset-normalizer>=3.1.0
+idna>=3.4
+beautifulsoup4>=4.12.2
+newsapi-python>=0.2.7
+logzero>=1.7.0
+
+# Visualization
+streamlit>=1.22.0
+plotly>=5.14.1
+matplotlib>=3.7.1
+
+# ML Optimization
+optuna>=3.1.1
+
+# Utilities
+python-dotenv>=1.0.0
+PyYAML>=6.0
+pyotp>=2.8.0
+tqdm>=4.65.0
+concurrent-log-handler>=0.9.20  # For proper logging
+requests-mock>=1.11.0  # For testing
+
+# Testing
+pytest>=7.4.0
+pytest-timeout>=2.1.0
+pytest-mock>=3.11.1
+pytest-cov>=4.1.0
+pytest-sugar>=0.9.7
+pytest-env>=1.0.1
+pytest-asyncio>=0.21.0  # For async tests
+
+# Development
+black>=23.3.0  # Code formatting
+isort>=5.12.0  # Import sorting
+flake8>=6.0.0  # Code linting
+urllib3
+gymnasium
+stable-baselines3
+protobuf==3.20.3
+ijson
+feedparser
+apscheduler
+google
+concurrent-log-handler
+
+# Python 3.9.23
+
+# Example usage in your training pipeline:
+#
+# from src.ai.models import AITrader
+# from src.data.collector import DataCollector
+#
+# config = ...  # Load your config as dict
+# collector = DataCollector(config)
+# trader = AITrader(config)
+#
+# for symbol in collector.get_symbols_from_config():
+#     market_data = collector.get_historical_data(symbol)
+#     # Add sentiment score to market data
+#     market_data = trader.add_sentiment_to_market_data(symbol, market_data)
+#     # Now train as usual
+#     result = trader.train(market_data)
+#     print(f"{symbol}: {result}")
+#
+# This will ensure sentiment_score is present as a feature if news is available.
