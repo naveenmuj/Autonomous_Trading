@@ -1,4 +1,3 @@
-# packages.txt  ── apt-get installs these before pip
 ta-lib-dev
 libta-lib0
 build-essential
