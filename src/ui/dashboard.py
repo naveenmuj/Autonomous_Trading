@@ -816,7 +816,8 @@ class DashboardUI:
                     
         except Exception as e:
             logger.error(f"Error showing current WebSocket data: {e}")
-            st.error("Error displaying WebSocket data")        except Exception as e:
+            st.error("Error displaying WebSocket data")
+        except Exception as e:
             logger.error(f"Error in fragment: {str(e)}", exc_info=True)
             # Show minimal error in UI to avoid session issues
             st.error("Live data temporarily unavailable")
