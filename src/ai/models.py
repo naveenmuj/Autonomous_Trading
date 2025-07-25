@@ -68,7 +68,7 @@ import os
 from datetime import datetime, timedelta
 import threading
 import time
-import talib
+import pandas_ta as ta
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
 logger = logging.getLogger(__name__)
@@ -152,7 +152,7 @@ class TechnicalAnalysisModel:
             resistances = {}
             # Method 1: Moving Average based SR levels
             for period in self.support_resistance_periods:
-                ma = talib.SMA(df['close'].values, timeperiod=period)
+                ma = ta.sma(df['close'], length=period)
                 supports[f'ma_{period}'] = ma[-1] * 0.98  # 2% below MA
                 resistances[f'ma_{period}'] = ma[-1] * 1.02  # 2% above MA
             # Method 2: Pivot Points
@@ -188,7 +188,7 @@ class TechnicalAnalysisModel:
             df = data.copy()
             trends = {}
             for period in self.trend_detection_periods:
-                ema = talib.EMA(df['close'].values, timeperiod=period)
+                ema = ta.ema(df['close'], length=period)
                 current_ema = ema[-1]
                 prev_ema = ema[-2]
                 slope = (current_ema - prev_ema) / prev_ema * 100
@@ -220,30 +220,24 @@ class TechnicalAnalysisModel:
         try:
             df = data.copy()
             # Basic indicators
-            df['rsi'] = talib.RSI(df['close'].values, timeperiod=self.rsi_period)
-            macd, signal, hist = talib.MACD(df['close'].values, 
-                                          fastperiod=self.macd_fast,
-                                          slowperiod=self.macd_slow,
-                                          signalperiod=self.macd_signal)
-            df['macd'] = macd
-            df['macd_signal'] = signal
-            df['macd_hist'] = hist
+            df['rsi'] = ta.rsi(df['close'], length=self.rsi_period)
+            macd_data = ta.macd(df['close'], fast=self.macd_fast, slow=self.macd_slow, signal=self.macd_signal)
+            df['macd'] = macd_data[f'MACD_{self.macd_fast}_{self.macd_slow}_{self.macd_signal}']
+            df['macd_signal'] = macd_data[f'MACDs_{self.macd_fast}_{self.macd_slow}_{self.macd_signal}']
+            df['macd_hist'] = macd_data[f'MACDh_{self.macd_fast}_{self.macd_slow}_{self.macd_signal}']
             # Bollinger Bands
-            upper, middle, lower = talib.BBANDS(df['close'].values,
-                                              timeperiod=self.bb_period,
-                                              nbdevup=self.bb_std,
-                                              nbdevdn=self.bb_std)
-            df['bb_upper'] = upper
-            df['bb_middle'] = middle
-            df['bb_lower'] = lower
+            bb_data = ta.bbands(df['close'], length=self.bb_period, std=self.bb_std)
+            df['bb_upper'] = bb_data[f'BBU_{self.bb_period}_{self.bb_std}.0']
+            df['bb_middle'] = bb_data[f'BBM_{self.bb_period}_{self.bb_std}.0']
+            df['bb_lower'] = bb_data[f'BBL_{self.bb_period}_{self.bb_std}.0']
             # Enhanced indicators
-            df['atr'] = talib.ATR(df['high'], df['low'], df['close'], timeperiod=14)
-            df['adx'] = talib.ADX(df['high'], df['low'], df['close'], timeperiod=14)
-            df['obv'] = talib.OBV(df['close'], df['volume'])
+            df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+            df['adx'] = ta.adx(df['high'], df['low'], df['close'], length=14)['ADX_14']
+            df['obv'] = ta.obv(df['close'], df['volume'])
             # Trend indicators
             for period in self.trend_detection_periods:
-                df[f'sma_{period}'] = talib.SMA(df['close'], timeperiod=period)
-                df[f'ema_{period}'] = talib.EMA(df['close'], timeperiod=period)
+                df[f'sma_{period}'] = ta.sma(df['close'], length=period)
+                df[f'ema_{period}'] = ta.ema(df['close'], length=period)
             # Calculate support/resistance and trends
             self.support_levels, self.resistance_levels = self.calculate_support_resistance(df)
             self.trends = self.detect_trends(df)
@@ -564,19 +558,17 @@ class TechnicalAnalysisModel:
             
             # Calculate requested indicators
             if "RSI" in indicators:
-                rsi = talib.RSI(data['close'].values, timeperiod=self.rsi_period)
+                rsi = ta.rsi(data['close'], length=self.rsi_period)
                 results['RSI'] = {
                     'value': rsi[-1] if not np.isnan(rsi[-1]) else 50,
                     'signal': 'Oversold' if rsi[-1] < 30 else 'Overbought' if rsi[-1] > 70 else 'Neutral'
                 }
             
             if "MACD" in indicators:
-                macd, signal, hist = talib.MACD(
-                    data['close'].values,
-                    fastperiod=self.macd_fast,
-                    slowperiod=self.macd_slow,
-                    signalperiod=self.macd_signal
-                )
+                macd_data = ta.macd(data['close'], fast=self.macd_fast, slow=self.macd_slow, signal=self.macd_signal)
+                macd = macd_data[f'MACD_{self.macd_fast}_{self.macd_slow}_{self.macd_signal}']
+                signal = macd_data[f'MACDs_{self.macd_fast}_{self.macd_slow}_{self.macd_signal}']
+                hist = macd_data[f'MACDh_{self.macd_fast}_{self.macd_slow}_{self.macd_signal}']
                 results['MACD'] = {
                     'value': macd[-1] if not np.isnan(macd[-1]) else 0,
                     'signal': signal[-1] if not np.isnan(signal[-1]) else 0,
@@ -585,19 +577,17 @@ class TechnicalAnalysisModel:
             
             if "SMA" in indicators:
                 for period in [20, 50, 200]:
-                    sma = talib.SMA(data['close'].values, timeperiod=period)
+                    sma = ta.sma(data['close'], length=period)
                     results[f'SMA_{period}'] = {
                         'value': sma[-1] if not np.isnan(sma[-1]) else data['close'].iloc[-1],
                         'signal': 'Above' if data['close'].iloc[-1] > sma[-1] else 'Below'
                     }
             
             if "Bollinger Bands" in indicators:
-                upper, middle, lower = talib.BBANDS(
-                    data['close'].values,
-                    timeperiod=self.bb_period,
-                    nbdevup=self.bb_std,
-                    nbdevdn=self.bb_std
-                )
+                bb_data = ta.bbands(data['close'], length=self.bb_period, std=self.bb_std)
+                upper = bb_data[f'BBU_{self.bb_period}_{self.bb_std}.0']
+                middle = bb_data[f'BBM_{self.bb_period}_{self.bb_std}.0']
+                lower = bb_data[f'BBL_{self.bb_period}_{self.bb_std}.0']
                 results['BB'] = {
                     'upper': upper[-1] if not np.isnan(upper[-1]) else data['close'].iloc[-1],
                     'middle': middle[-1] if not np.isnan(middle[-1]) else data['close'].iloc[-1],
@@ -638,22 +628,20 @@ class TechnicalAnalysisModel:
                 if category == 'trend_indicators':
                     if indicators.get('sma'):
                         for period in indicators['sma']:
-                            df[f'sma_{period}'] = talib.SMA(df['close'], timeperiod=period)
+                            df[f'sma_{period}'] = ta.sma(df['close'], length=period)
                             results[category][f'sma_{period}'] = df[f'sma_{period}'].values
                             
                     if indicators.get('ema'):
                         for period in indicators['ema']:
-                            df[f'ema_{period}'] = talib.EMA(df['close'], timeperiod=period)
+                            df[f'ema_{period}'] = ta.ema(df['close'], length=period)
                             results[category][f'ema_{period}'] = df[f'ema_{period}'].values
                             
                     if indicators.get('macd'):
                         macd_config = indicators['macd']
-                        macd, signal, hist = talib.MACD(
-                            df['close'],
-                            fastperiod=macd_config['fast'],
-                            slowperiod=macd_config['slow'],
-                            signalperiod=macd_config['signal']
-                        )
+                        macd_data = ta.macd(df['close'], fast=macd_config['fast'], slow=macd_config['slow'], signal=macd_config['signal'])
+                        macd = macd_data[f'MACD_{macd_config["fast"]}_{macd_config["slow"]}_{macd_config["signal"]}']
+                        signal = macd_data[f'MACDs_{macd_config["fast"]}_{macd_config["slow"]}_{macd_config["signal"]}']
+                        hist = macd_data[f'MACDh_{macd_config["fast"]}_{macd_config["slow"]}_{macd_config["signal"]}']
                         results[category]['macd'] = {
                             'macd': macd,
                             'signal': signal,
@@ -663,18 +651,16 @@ class TechnicalAnalysisModel:
                 elif category == 'momentum_indicators':
                     if indicators.get('rsi'):
                         period = indicators['rsi']['period']
-                        df['rsi'] = talib.RSI(df['close'], timeperiod=period)
+                        df['rsi'] = ta.rsi(df['close'], length=period)
                         results[category]['rsi'] = df['rsi'].values
                         
                 elif category == 'volatility_indicators':
                     if indicators.get('bollinger_bands'):
                         bb_config = indicators['bollinger_bands']
-                        upper, middle, lower = talib.BBANDS(
-                            df['close'],
-                            timeperiod=bb_config['period'],
-                            nbdevup=bb_config['std_dev'],
-                            nbdevdn=bb_config['std_dev']
-                        )
+                        bb_data = ta.bbands(df['close'], length=bb_config['period'], std=bb_config['std_dev'])
+                        upper = bb_data['BBU_20_2.0']
+                        middle = bb_data['BBM_20_2.0']
+                        lower = bb_data['BBL_20_2.0']
                         results[category]['bollinger_bands'] = {
                             'upper': upper,
                             'middle': middle,
@@ -684,7 +670,7 @@ class TechnicalAnalysisModel:
                 elif category == 'volume_indicators':
                     if indicators.get('volume_sma'):
                         period = indicators['volume_sma']
-                        df['volume_sma'] = talib.SMA(df['volume'], timeperiod=period)
+                        df['volume_sma'] = ta.sma(df['volume'], length=period)
                         results[category]['volume_sma'] = df['volume_sma'].values
             
             # Add basic price data

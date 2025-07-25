@@ -16,7 +16,7 @@ from pathlib import Path
 from SmartApi import SmartConnect
 from .websocket import MarketDataWebSocket, get_websocket_instance, close_global_websocket
 import threading
-import talib
+import pandas_ta as ta
 
 logger = logging.getLogger(__name__)
 
@@ -1804,104 +1804,52 @@ class DataCollector:
 
     def detect_candlestick_patterns(self, df):
         """
-        Detect common candlestick patterns using TA-Lib and annotate the DataFrame.
+        Detect common candlestick patterns using pandas_ta and annotate the DataFrame.
         Adds a 'pattern' column with the detected pattern name (or '' if none).
         """
-        import talib
-        all_patterns = {
-            'CDL2CROWS': talib.CDL2CROWS,
-            'CDL3BLACKCROWS': talib.CDL3BLACKCROWS,
-            'CDL3INSIDE': talib.CDL3INSIDE,
-            'CDL3LINESTRIKE': talib.CDL3LINESTRIKE,
-            'CDL3OUTSIDE': talib.CDL3OUTSIDE,
-            'CDL3STARSINSOUTH': talib.CDL3STARSINSOUTH,
-            'CDL3WHITESOLDIERS': talib.CDL3WHITESOLDIERS,
-            'CDLABANDONEDBABY': talib.CDLABANDONEDBABY,
-            'CDLADVANCEBLOCK': talib.CDLADVANCEBLOCK,
-            'CDLBELTHOLD': talib.CDLBELTHOLD,
-            'CDLBREAKAWAY': talib.CDLBREAKAWAY,
-            'CDLCLOSINGMARUBOZU': talib.CDLCLOSINGMARUBOZU,
-            'CDLCONCEALBABYSWALL': talib.CDLCONCEALBABYSWALL,
-            'CDLCOUNTERATTACK': talib.CDLCOUNTERATTACK,
-            'CDLDARKCLOUDCOVER': talib.CDLDARKCLOUDCOVER,
-            'CDLDOJI': talib.CDLDOJI,
-            'CDLDOJISTAR': talib.CDLDOJISTAR,
-            'CDLDRAGONFLYDOJI': talib.CDLDRAGONFLYDOJI,
-            'CDLENGULFING': talib.CDLENGULFING,
-            'CDLEVENINGDOJISTAR': talib.CDLEVENINGDOJISTAR,
-            'CDLEVENINGSTAR': talib.CDLEVENINGSTAR,
-            'CDLGAPSIDESIDEWHITE': talib.CDLGAPSIDESIDEWHITE,
-            'CDLGRAVESTONEDOJI': talib.CDLGRAVESTONEDOJI,
-            'CDLHAMMER': talib.CDLHAMMER,
-            'CDLHANGINGMAN': talib.CDLHANGINGMAN,
-            'CDLHARAMI': talib.CDLHARAMI,
-            'CDLHARAMICROSS': talib.CDLHARAMICROSS,
-            'CDLHIGHWAVE': talib.CDLHIGHWAVE,
-            'CDLHIKKAKE': talib.CDLHIKKAKE,
-            'CDLHIKKAKEMOD': talib.CDLHIKKAKEMOD,
-            'CDLHOMINGPIGEON': talib.CDLHOMINGPIGEON,
-            'CDLIDENTICAL3CROWS': talib.CDLIDENTICAL3CROWS,
-            'CDLINNECK': talib.CDLINNECK,
-            'CDLINVERTEDHAMMER': talib.CDLINVERTEDHAMMER,
-            'CDLKICKING': talib.CDLKICKING,
-            'CDLKICKINGBYLENGTH': talib.CDLKICKINGBYLENGTH,
-            'CDLLADDERBOTTOM': talib.CDLLADDERBOTTOM,
-            'CDLLONGLEGGEDDOJI': talib.CDLLONGLEGGEDDOJI,
-            'CDLLONGLINE': talib.CDLLONGLINE,
-            'CDLMARUBOZU': talib.CDLMARUBOZU,
-            'CDLMORNINGDOJISTAR': talib.CDLMORNINGDOJISTAR,
-            'CDLMORNINGSTAR': talib.CDLMORNINGSTAR,
-            'CDLONNECK': talib.CDLONNECK,
-            'CDLPPIERCING': talib.CDLPIERCING,
-            'CDLRICKSHAWMAN': talib.CDLRICKSHAWMAN,
-            'CDLRISEFALL3METHODS': talib.CDLRISEFALL3METHODS,
-            'CDLSEPARATINGLINES': talib.CDLSEPARATINGLINES,
-            'CDLSHOOTINGSTAR': talib.CDLSHOOTINGSTAR,
-            'CDLSHORTLINE': talib.CDLSHORTLINE,
-            'CDLSPINNINGTOP': talib.CDLSPINNINGTOP,
-            'CDLSTALLEDPATTERN': talib.CDLSTALLEDPATTERN,
-            'CDLSTICKSANDWICH': talib.CDLSTICKSANDWICH,
-            'CDLTAKURI': talib.CDLTAKURI,
-            'CDLTASUKIGAP': talib.CDLTASUKIGAP,
-            'CDLTHRUSTING': talib.CDLTHRUSTING,
-            'CDLTRISTAR': talib.CDLTRISTAR,
-            'CDLUNIQUE3RIVER': talib.CDLUNIQUE3RIVER,
-            'CDLUPSIDEGAP2CROWS': talib.CDLUPSIDEGAP2CROWS,
-            'CDLXSIDEGAP3METHODS': talib.CDLXSIDEGAP3METHODS,
-        }
-        if df is None or df.empty:
-            logger.warning("Input DataFrame is empty or None for pattern detection.")
-            # Always return a DataFrame with a 'pattern' column
-            if df is None:
-                import pandas as pd
-                df = pd.DataFrame()
-            df = df.copy()
-            df['pattern'] = [''] * len(df)
+        if len(df) < 20:  # Need sufficient data for pattern detection
+            df['pattern'] = ''
             return df
-        pattern_result = []
-        for i in range(len(df)):
-            found = ''
-            for name, func in all_patterns.items():
-                try:
-                    res = func(
-                        df['open'].values[max(0, i-4):i+1],
-                        df['high'].values[max(0, i-4):i+1],
-                        df['low'].values[max(0, i-4):i+1],
-                        df['close'].values[max(0, i-4):i+1]
-                    )
-                    if res[-1] != 0:
-                        found = name
-                        logger.info(f"Pattern detected at index {i}: {name}")
-                        break
-                except Exception as e:
-                    logger.debug(f"Pattern detection error for {name} at index {i}: {e}")
-                    continue
-            pattern_result.append(found)
-        df = df.copy()
-        df['pattern'] = pattern_result
-        # Log summary statistics for detected patterns
-        pattern_counts = df['pattern'].value_counts().to_dict()
-        logger.info(f"Candlestick pattern detection summary: {pattern_counts}")
+            
+        try:
+            # Use pandas_ta for basic candlestick patterns
+            # Get all available candlestick patterns
+            patterns = ta.cdl_pattern(df['open'], df['high'], df['low'], df['close'])
+            
+            # Initialize pattern column
+            df['pattern'] = ''
+            
+            # Check for the most common patterns that are supported
+            if patterns is not None and not patterns.empty:
+                # Find the last non-zero pattern
+                for idx in reversed(df.index):
+                    if idx in patterns.index:
+                        pattern_val = patterns.loc[idx]
+                        if pattern_val != 0:
+                            # Map pattern values to names (simplified)
+                            if pattern_val > 0:
+                                df.loc[idx, 'pattern'] = 'BULLISH_PATTERN'
+                            else:
+                                df.loc[idx, 'pattern'] = 'BEARISH_PATTERN'
+                            break
+            
+            # Fallback: Basic pattern detection using manual logic
+            if df['pattern'].iloc[-1] == '':
+                # Simple doji detection
+                body_size = abs(df['close'] - df['open'])
+                avg_body = body_size.rolling(10).mean()
+                if body_size.iloc[-1] < avg_body.iloc[-1] * 0.1:
+                    df.loc[df.index[-1], 'pattern'] = 'DOJI'
+                
+                # Simple hammer detection
+                elif (df['close'].iloc[-1] > df['open'].iloc[-1] and 
+                      (df['low'].iloc[-1] < df['open'].iloc[-1] - (df['high'].iloc[-1] - df['low'].iloc[-1]) * 0.6)):
+                    df.loc[df.index[-1], 'pattern'] = 'HAMMER'
+                    
+        except Exception as e:
+            logger.warning(f"Error in candlestick pattern detection: {e}")
+            df['pattern'] = ''
+            
         return df
 
     def get_live_quote(self, symbol: str) -> Optional[Dict[str, Any]]:

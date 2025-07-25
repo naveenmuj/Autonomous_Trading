@@ -40,12 +40,12 @@ def get_sklearn():
         return None, None
 
 def get_talib():
-    """Lazy load TA-Lib"""
+    """Return pandas_ta as replacement for TA-Lib"""
     try:
-        import talib
-        return talib
+        import pandas_ta as ta
+        return ta
     except ImportError as e:
-        logger.error(f"TA-Lib import failed: {e}")
+        logger.error(f"pandas_ta import failed: {e}")
         return None
 
 class TrainingPipeline:
@@ -100,23 +100,23 @@ class TrainingPipeline:
             df = data.copy()
             
             if self.talib:
-                # Technical indicators using TA-Lib
-                df['sma_10'] = self.talib.SMA(df['close'], timeperiod=10)
-                df['sma_20'] = self.talib.SMA(df['close'], timeperiod=20)
-                df['sma_50'] = self.talib.SMA(df['close'], timeperiod=50)
-                df['rsi'] = self.talib.RSI(df['close'], timeperiod=14)
+                # Technical indicators using pandas_ta
+                df['sma_10'] = self.talib.sma(df['close'], length=10)
+                df['sma_20'] = self.talib.sma(df['close'], length=20)
+                df['sma_50'] = self.talib.sma(df['close'], length=50)
+                df['rsi'] = self.talib.rsi(df['close'], length=14)
                 
-                macd, macd_signal, _ = self.talib.MACD(df['close'])
-                df['macd'] = macd
-                df['macd_signal'] = macd_signal
+                macd_data = self.talib.macd(df['close'], fast=12, slow=26, signal=9)
+                df['macd'] = macd_data['MACD_12_26_9']
+                df['macd_signal'] = macd_data['MACDs_12_26_9']
                 
-                upper, middle, lower = self.talib.BBANDS(df['close'])
-                df['bb_upper'] = upper
-                df['bb_middle'] = middle
-                df['bb_lower'] = lower
+                bb_data = self.talib.bbands(df['close'], length=20, std=2)
+                df['bb_upper'] = bb_data['BBU_20_2.0']
+                df['bb_middle'] = bb_data['BBM_20_2.0']
+                df['bb_lower'] = bb_data['BBL_20_2.0']
                 
-                df['atr'] = self.talib.ATR(df['high'], df['low'], df['close'])
-                df['volume_sma'] = self.talib.SMA(df['volume'], timeperiod=20)
+                df['atr'] = self.talib.atr(df['high'], df['low'], df['close'], length=14)
+                df['volume_sma'] = self.talib.sma(df['volume'], length=20)
             else:
                 # Fallback to basic calculations if TA-Lib is not available
                 df['returns'] = df['close'].pct_change()
